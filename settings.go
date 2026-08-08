@@ -11,14 +11,17 @@ import (
 	"sync"
 )
 
-// WebSettings 是管理界面自身的可改配置：监听端口、监听地址（本地/全接口）。
+// WebSettings 是管理界面和入站端口的可改配置：监听端口、监听地址（本地/全接口）、
+// 入站随机端口范围。
 // 落盘持久化，界面改完重启监听即时生效。访问口令与访问路径各有专门的文件
 // （password / basepath），不放这里，但都能在设置面板里改。
 type WebSettings struct {
 	// Port 是管理界面监听端口。
 	Port int `json:"port"`
 	// ListenAddr 是监听地址：空或 0.0.0.0 表示所有网卡；127.0.0.1 表示只本机。
-	ListenAddr string `json:"listen_addr"`
+	ListenAddr     string `json:"listen_addr"`
+	InboundPortMin int    `json:"inbound_port_min"`
+	InboundPortMax int    `json:"inbound_port_max"`
 }
 
 var (
@@ -33,7 +36,7 @@ func webSettingsFilePath(dir string) string { return filepath.Join(dir, "setting
 func loadWebSettings(dir string, defaultPort int) (WebSettings, error) {
 	webSettingsPath = webSettingsFilePath(dir)
 
-	s := WebSettings{Port: defaultPort, ListenAddr: ""}
+	s := WebSettings{Port: defaultPort, ListenAddr: "", InboundPortMin: inboundPortMinDefault, InboundPortMax: inboundPortMaxDefault}
 	blob, err := os.ReadFile(webSettingsPath)
 	switch {
 	case os.IsNotExist(err):
@@ -49,6 +52,15 @@ func loadWebSettings(dir string, defaultPort int) (WebSettings, error) {
 	}
 	if s.Port == 0 {
 		s.Port = defaultPort
+	}
+	if s.InboundPortMin == 0 {
+		s.InboundPortMin = inboundPortMinDefault
+	}
+	if s.InboundPortMax == 0 {
+		s.InboundPortMax = inboundPortMaxDefault
+	}
+	if err := validatePortRange(s.InboundPortMin, s.InboundPortMax); err != nil {
+		return s, err
 	}
 	webSettingsMu.Lock()
 	webSettingsCur = s
@@ -74,6 +86,17 @@ func saveWebSettings() error {
 		return err
 	}
 	return os.Rename(tmp, webSettingsPath)
+}
+
+func setInboundPortRangeSettings(min, max int) error {
+	if err := validatePortRange(min, max); err != nil {
+		return err
+	}
+	webSettingsMu.Lock()
+	webSettingsCur.InboundPortMin = min
+	webSettingsCur.InboundPortMax = max
+	webSettingsMu.Unlock()
+	return saveWebSettings()
 }
 
 // normalizeListenAddr 把用户填的监听地址规整成合法值：空 / 0.0.0.0 / 127.0.0.1 / 具体 IP。

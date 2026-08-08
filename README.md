@@ -35,6 +35,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.s
 会自动下载对应架构的预编译二进制。也可以 clone 仓库后在源码目录运行同一个脚本，
 那样会从源码编译（需要 Go 1.24+）。
 
+安装脚本从源码编译时默认关闭 CGO，生成不依赖目标机 glibc 版本的静态二进制：
+
+```bash
+CGO_ENABLED=0 go build -trimpath -tags "netgo osusergo" \
+  -ldflags="-s -w -X main.version=dev" -o fanout .
+```
+
 安装脚本只会补齐 `curl` 和 `tar`，再下载 fanout 与最新版 sing-box 到
 `/var/lib/fanout/bin/`。运行时要求 sing-box `>=1.14.0`（支持后续版本），且必须带
 `with_openvpn,with_gvisor` 两个构建标签。也可以通过 `SINGBOX_VERSION=...` 指定版本。
@@ -49,6 +56,13 @@ OpenVPN endpoint 在 sing-box 1.14 中仍是预发布能力。生产使用前应
 
 ```bash
 ./fanout -inbound-listen :: -web 8899 -dir /var/lib/fanout
+```
+
+sing-box 默认从工作目录的 `bin/sing-box`、`/usr/local/bin/sing-box` 或 PATH 查找。二进制文件名
+不是默认值时，使用 `-bin` 指定；自定义文件必须放在工作目录的 `bin/` 下：
+
+```bash
+./fanout -bin sing-box-custom -dir /var/lib/fanout
 ```
 
 Linux 默认会把 `::` 作为 IPv6 wildcard，并通常同时接受 IPv4-mapped 连接；如果系统开启了
@@ -147,6 +161,9 @@ f log        # 跟踪日志
 f update     # 更新到最新版
 f uninstall  # 卸载
 ```
+
+管理界面的“设置”中可以调整入站随机端口范围，默认 `50000-60000`。该范围只影响
+留空端口时新建/复制的入站；已有端口和手动填写的端口不会自动修改。
 
 隧道状态存在 `/var/lib/fanout/state.json`，重启后自动恢复，端口保持不变。
 

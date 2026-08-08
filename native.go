@@ -14,25 +14,37 @@ import (
 // 入站数据存在 native.json，sing-box 的运行配置每次改动后整份重新生成。
 // 全量重写比增量改省心：配置是纯函数产物，不会出现改了一半的中间态。
 type Native struct {
-	mu         sync.Mutex
-	dir        string
-	listenAddr string
-	store      *nativeStore
-	proc       *singBoxProc
+	mu             sync.Mutex
+	dir            string
+	listenAddr     string
+	inboundPortMin int
+	inboundPortMax int
+	store          *nativeStore
+	proc           *singBoxProc
 }
 
 func openNative(workDir string, listen ...string) (*Native, error) {
-	if workDir == "" {
-		return nil, fmt.Errorf("自建模式缺少工作目录")
-	}
 	listenAddr := "0.0.0.0"
 	if len(listen) > 0 && strings.TrimSpace(listen[0]) != "" {
 		listenAddr = strings.TrimSpace(listen[0])
 	}
+	return openNativeConfigured(workDir, listenAddr, inboundPortMinDefault, inboundPortMaxDefault)
+}
+
+func openNativeConfigured(workDir, listenAddr string, portMin, portMax int, binary ...string) (*Native, error) {
+	if workDir == "" {
+		return nil, fmt.Errorf("自建模式缺少工作目录")
+	}
+	if strings.TrimSpace(listenAddr) == "" {
+		listenAddr = "0.0.0.0"
+	}
 	if err := validateInboundListenAddr(listenAddr); err != nil {
 		return nil, err
 	}
-	bin, err := findSingBox(workDir)
+	if err := validatePortRange(portMin, portMax); err != nil {
+		return nil, err
+	}
+	bin, err := findSingBox(workDir, binary...)
 	if err != nil {
 		return nil, err
 	}
@@ -54,10 +66,12 @@ func openNative(workDir string, listen ...string) (*Native, error) {
 		}
 	}
 	n := &Native{
-		dir:        workDir,
-		listenAddr: listenAddr,
-		store:      store,
-		proc:       &singBoxProc{bin: bin, dir: filepath.Join(workDir, "sing-box"), name: "gateway"},
+		dir:            workDir,
+		listenAddr:     listenAddr,
+		inboundPortMin: portMin,
+		inboundPortMax: portMax,
+		store:          store,
+		proc:           &singBoxProc{bin: bin, dir: filepath.Join(workDir, "sing-box"), name: "gateway"},
 	}
 	// Stop a child left behind by an unclean fanout shutdown.
 	n.proc.reapOrphan()
@@ -105,6 +119,16 @@ func (n *Native) OnTunnelsChanged(tunnels []*Tunnel) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.apply(tunnels)
+}
+
+func (n *Native) SetInboundPortRange(min, max int) error {
+	if err := validatePortRange(min, max); err != nil {
+		return err
+	}
+	n.mu.Lock()
+	n.inboundPortMin, n.inboundPortMax = min, max
+	n.mu.Unlock()
+	return nil
 }
 
 // Close 停掉自己拉起的 sing-box。
@@ -256,14 +280,14 @@ func (n *Native) CloneToTunnels(templateID int, hosts []string, tunnels []*Tunne
 		byHost[t.Node.HostName] = t
 	}
 
-	used := n.store.usedPorts()
+	used := n.store.usedPorts(tpl.netOrTCP())
 	created := []int{}
 	for _, host := range hosts {
 		t := byHost[host]
 		if t == nil || t.Status != "up" {
 			continue
 		}
-		port, err := freeRandomPort(used)
+		port, err := freeRandomInboundPort(used, n.inboundPortMin, n.inboundPortMax, tpl.netOrTCP())
 		if err != nil {
 			return created, err
 		}
@@ -475,7 +499,16 @@ func (n *Native) CreateInbound(spec NewInboundSpec, tunnels []*Tunnel) (*Created
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	ns, err := normalizeInboundSpec(spec, n.store.usedPorts())
+	requestedNetwork := strings.ToLower(strings.TrimSpace(spec.Network))
+	if requestedNetwork == "" {
+		proto := strings.ToLower(strings.TrimSpace(spec.Protocol))
+		if proto == "hysteria2" || proto == "tuic" {
+			requestedNetwork = "udp"
+		} else {
+			requestedNetwork = "tcp"
+		}
+	}
+	ns, err := normalizeInboundSpec(spec, n.store.usedPorts(requestedNetwork), n.inboundPortMin, n.inboundPortMax)
 	if err != nil {
 		return nil, err
 	}

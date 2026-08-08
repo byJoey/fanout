@@ -23,6 +23,7 @@ func main() {
 		maxSlots      = flag.Int("max", 20, "最多同时运行的隧道数")
 		workDir       = flag.String("dir", "/var/lib/fanout", "工作目录")
 		inboundListen = flag.String("inbound-listen", "0.0.0.0", "自建节点监听地址；使用 :: 接收 IPv6/双栈连接")
+		singBoxName   = flag.String("bin", "sing-box", "sing-box 二进制文件名（位于工作目录/bin，不支持路径）")
 	)
 	publicIP := flag.String("ip", "", "母机公网 IPv4，用于分享链接/SOCKS5 地址；留空则自动探测")
 	showVersion := flag.Bool("version", false, "显示版本后退出")
@@ -42,7 +43,7 @@ func main() {
 	}
 	setPublicIPOverride(*publicIP)
 	go hostPublicIP() // 预热探测，别让首个请求阻塞
-	singBoxBin, err := findSingBox(*workDir)
+	singBoxBin, err := findSingBox(*workDir, *singBoxName)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -50,7 +51,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	configurePanelWithListen(*workDir, *inboundListen)
+	webCfg, err := loadWebSettings(*workDir, *webPort)
+	if err != nil {
+		log.Fatalf("加载 Web 设置失败: %v", err)
+	}
+	configurePanelWithListenRangeAndBin(*workDir, *inboundListen, webCfg.InboundPortMin, webCfg.InboundPortMax, *singBoxName)
 	if p, err := openPanel(); err != nil {
 		log.Printf("节点链接后端暂不可用（可在 Web 界面查看原因）: %v", err)
 	} else {
@@ -58,6 +63,8 @@ func main() {
 	}
 
 	mgr := NewManager(*maxSlots, *workDir)
+	// findSingBox above already resolved the configured filename to a concrete
+	// executable path; pass that path to tunnel workers directly.
 	mgr.singBoxBin = singBoxBin
 	log.Printf("正在拉取节点列表...")
 	if n, err := mgr.RefreshNodes(); err != nil {
@@ -130,11 +137,6 @@ func main() {
 		log.Printf("已生成访问路径，见 %s", filepath.Join(*workDir, "basepath"))
 	}
 
-	webCfg, err := loadWebSettings(*workDir, *webPort)
-	if err != nil {
-		log.Fatalf("加载 Web 设置失败: %v", err)
-	}
-
 	srv := newWebServer(StripBasePath(auth.Wrap(mux)))
 	// 设置面板：改密码 / 改路径 / 改端口 / 改本地监听。
 	mux.HandleFunc("/api/settings", apiSettings(auth, srv))
@@ -142,7 +144,7 @@ func main() {
 	mux.HandleFunc("/api/update/apply", apiUpdateApply)
 
 	log.Printf("管理界面: http://<本机IP>%s%s/", webCfg.listenAddrString(), currentBasePath())
-	log.Printf("SOCKS5 端口在 %d-%d 之间随机分配", randPortMin, randPortMax)
+	log.Printf("SOCKS5 端口在 %d-%d 之间随机分配；入站随机端口范围 %d-%d", randPortMin, randPortMax, webCfg.InboundPortMin, webCfg.InboundPortMax)
 	if err := srv.serve(); err != nil {
 		log.Fatal(err)
 	}
@@ -273,10 +275,12 @@ func apiCred(m *Manager) http.HandlerFunc {
 // GET 返回当前值（不含明文口令）；POST 按传入的字段逐项应用，任一项失败即整体回报。
 func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 	type settingsReq struct {
-		Password   *string `json:"password"`    // 非空则改口令
-		BasePath   *string `json:"base_path"`   // 提供即改访问路径（空串=去掉前缀）
-		Port       *int    `json:"port"`        // 提供即改监听端口
-		ListenAddr *string `json:"listen_addr"` // 提供即改监听地址
+		Password       *string `json:"password"`    // 非空则改口令
+		BasePath       *string `json:"base_path"`   // 提供即改访问路径（空串=去掉前缀）
+		Port           *int    `json:"port"`        // 提供即改监听端口
+		ListenAddr     *string `json:"listen_addr"` // 提供即改监听地址
+		InboundPortMin *int    `json:"inbound_port_min"`
+		InboundPortMax *int    `json:"inbound_port_max"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -314,6 +318,32 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 					return
 				}
 			}
+			if in.InboundPortMin != nil || in.InboundPortMax != nil {
+				next := getWebSettings()
+				if in.InboundPortMin != nil {
+					next.InboundPortMin = *in.InboundPortMin
+				}
+				if in.InboundPortMax != nil {
+					next.InboundPortMax = *in.InboundPortMax
+				}
+				if err := validatePortRange(next.InboundPortMin, next.InboundPortMax); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				p, err := openPanel()
+				if err != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := p.SetInboundPortRange(next.InboundPortMin, next.InboundPortMax); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := setInboundPortRangeSettings(next.InboundPortMin, next.InboundPortMax); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+			}
 		}
 
 		cfg := getWebSettings()
@@ -322,11 +352,13 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 			listen = "0.0.0.0"
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"base_path":    currentBasePath(),
-			"port":         cfg.Port,
-			"listen_addr":  listen,
-			"has_password": true,
-			"version":      version,
+			"base_path":        currentBasePath(),
+			"port":             cfg.Port,
+			"listen_addr":      listen,
+			"inbound_port_min": cfg.InboundPortMin,
+			"inbound_port_max": cfg.InboundPortMax,
+			"has_password":     true,
+			"version":          version,
 		})
 	}
 }

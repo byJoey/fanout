@@ -460,6 +460,14 @@ textarea:focus{outline:none;border-color:var(--accent)}
       </div>
       <div class="hint bad" id="setPortHint">改端口或监听地址会切换监听，保存后要用新地址重新打开界面。</div>
 
+      <div class="setrow">
+        <label class="f" style="margin:0"><span>入站端口起始</span>
+          <input id="setInboundMin" type="text" inputmode="numeric" spellcheck="false"></label>
+        <label class="f" style="margin:0"><span>入站端口结束</span>
+          <input id="setInboundMax" type="text" inputmode="numeric" spellcheck="false"></label>
+      </div>
+      <div class="hint">留空端口时，从此范围随机分配；默认 50000-60000。已有入站端口不会改变。</div>
+
       <div class="updsec">
         <div class="updrow">
           <div class="updver">版本 <b id="updCur">-</b><span id="updLatest"></span></div>
@@ -1171,6 +1179,8 @@ $('#settingsBtn').onclick = async () => {
     $('#setPath').value = (s.base_path || '').replace(/^\//, '');
     $('#setPort').value = s.port || '';
     $('#setListen').value = s.listen_addr || '0.0.0.0';
+    $('#setInboundMin').value = s.inbound_port_min || 50000;
+    $('#setInboundMax').value = s.inbound_port_max || 60000;
     $('#setPathHint').textContent = '界面挂在这个路径下，扫端口的探不到。只能用字母数字和 - _。';
     $('#updCur').textContent = s.version || '-';
     $('#updLatest').textContent = '';
@@ -1242,8 +1252,12 @@ $('#setSave').onclick = async e => {
   if(pw) body.password = pw;
   body.base_path = $('#setPath').value.trim();
   const port = parseInt($('#setPort').value.trim(), 10);
+  const inboundMin = parseInt($('#setInboundMin').value.trim(), 10);
+  const inboundMax = parseInt($('#setInboundMax').value.trim(), 10);
   if(port) body.port = port;
   body.listen_addr = $('#setListen').value;
+  body.inbound_port_min = inboundMin;
+  body.inbound_port_max = inboundMax;
 
   const portChanged = curSettings && (port !== curSettings.port
     || body.listen_addr !== (curSettings.listen_addr || '0.0.0.0'));

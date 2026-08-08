@@ -39,6 +39,8 @@ type Panel interface {
 
 	// OnTunnelsChanged rebuilds the gateway outbounds after tunnel changes.
 	OnTunnelsChanged(tunnels []*Tunnel) error
+	// SetInboundPortRange changes the range used for future random inbounds.
+	SetInboundPortRange(min, max int) error
 
 	// Close releases the sing-box gateway process.
 	Close()
@@ -73,21 +75,35 @@ func closePanel() {
 
 // panelState caches the sing-box gateway backend.
 var panelState struct {
-	mu         sync.Mutex
-	current    Panel
-	workDir    string
-	listenAddr string
+	mu             sync.Mutex
+	current        Panel
+	workDir        string
+	listenAddr     string
+	inboundPortMin int
+	inboundPortMax int
+	binName        string
 }
 
 func configurePanel(workDir string) {
-	configurePanelWithListen(workDir, "0.0.0.0")
+	configurePanelWithListenRange(workDir, "0.0.0.0", inboundPortMinDefault, inboundPortMaxDefault)
 }
 
 func configurePanelWithListen(workDir, listenAddr string) {
+	configurePanelWithListenRange(workDir, listenAddr, inboundPortMinDefault, inboundPortMaxDefault)
+}
+
+func configurePanelWithListenRange(workDir, listenAddr string, min, max int) {
+	configurePanelWithListenRangeAndBin(workDir, listenAddr, min, max, "sing-box")
+}
+
+func configurePanelWithListenRangeAndBin(workDir, listenAddr string, min, max int, binName string) {
 	panelState.mu.Lock()
 	defer panelState.mu.Unlock()
 	panelState.workDir = workDir
 	panelState.listenAddr = listenAddr
+	panelState.inboundPortMin = min
+	panelState.inboundPortMax = max
+	panelState.binName = binName
 	panelState.current = nil
 }
 
@@ -100,7 +116,7 @@ func openPanel() (Panel, error) {
 		return panelState.current, nil
 	}
 
-	n, err := openNative(panelState.workDir, panelState.listenAddr)
+	n, err := openNativeConfigured(panelState.workDir, panelState.listenAddr, panelState.inboundPortMin, panelState.inboundPortMax, panelState.binName)
 	if err != nil {
 		return nil, err
 	}

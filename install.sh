@@ -139,7 +139,7 @@ esac
 
 if [[ -f main.go ]] && command -v go >/dev/null; then
   echo "      从源码编译"
-  go build -trimpath -ldflags "-s -w" -o "$BIN" .
+  CGO_ENABLED=0 go build -trimpath -tags "netgo osusergo" -ldflags "-s -w" -o "$BIN" .
 else
   echo "      下载预编译版本 (${GOARCH})"
   TMP=$(mktemp -d)

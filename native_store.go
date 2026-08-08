@@ -142,9 +142,12 @@ func (s *nativeStore) byID(id int) *nativeInbound {
 	return nil
 }
 
-func (s *nativeStore) usedPorts() map[int]bool {
+func (s *nativeStore) usedPorts(network ...string) map[int]bool {
 	used := map[int]bool{}
 	for _, ib := range s.Inbounds {
+		if len(network) > 0 && network[0] != "" && ib.netOrTCP() != network[0] {
+			continue
+		}
 		used[ib.Port] = true
 	}
 	return used

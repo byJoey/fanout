@@ -97,24 +97,40 @@ func comparePrerelease(a, b string) int {
 	return 0
 }
 
-func singBoxCandidates(workDir string) []string {
+func singBoxCandidates(workDir, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "sing-box"
+	}
+	// Custom binaries are intentionally scoped to the work directory's bin/
+	// folder. The default name retains system/PATH fallbacks for installed hosts.
+	if name != "sing-box" {
+		return []string{filepath.Join(workDir, "bin", name)}
+	}
 	return []string{
-		filepath.Join(workDir, "bin", "sing-box"),
-		"/usr/local/bin/sing-box",
-		"/usr/bin/sing-box",
+		filepath.Join(workDir, "bin", name),
+		filepath.Join("/usr/local/bin", name),
+		filepath.Join("/usr/bin", name),
 	}
 }
 
-func findSingBox(workDir string) (string, error) {
-	for _, path := range singBoxCandidates(workDir) {
+func findSingBox(workDir string, name ...string) (string, error) {
+	binName := "sing-box"
+	if len(name) > 0 && strings.TrimSpace(name[0]) != "" {
+		binName = strings.TrimSpace(name[0])
+	}
+	if filepath.Base(binName) != binName || binName == "." || binName == ".." {
+		return "", fmt.Errorf("sing-box 二进制参数只能是文件名，不能包含路径: %q", binName)
+	}
+	for _, path := range singBoxCandidates(workDir, binName) {
 		if st, err := os.Stat(path); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
 			return path, nil
 		}
 	}
-	if path, err := exec.LookPath("sing-box"); err == nil {
+	if path, err := exec.LookPath(binName); err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("找不到 sing-box，可执行文件应位于 %s", filepath.Join(workDir, "bin", "sing-box"))
+	return "", fmt.Errorf("找不到 %s，可执行文件应位于 %s", binName, filepath.Join(workDir, "bin", binName))
 }
 
 // validateSingBox checks the two optional features required by userspace

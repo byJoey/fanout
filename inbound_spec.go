@@ -22,7 +22,11 @@ type normalizedSpec struct {
 //
 // used 是已被占用的端口集合；端口留空时从中避开随机挑一个。
 // Keeping validation separate from persistence also makes protocol combinations testable.
-func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSpec, error) {
+func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool, portRange ...int) (*normalizedSpec, error) {
+	portMin, portMax := inboundPortMinDefault, inboundPortMaxDefault
+	if len(portRange) == 2 {
+		portMin, portMax = portRange[0], portRange[1]
+	}
 	proto := strings.ToLower(strings.TrimSpace(spec.Protocol))
 	if proto == "" {
 		proto = "vless"
@@ -69,14 +73,20 @@ func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSp
 	// vmess+ws+tls 是很常见的组合，不该拦。
 
 	port := spec.Port
+	usedNetwork := network
 	if port == 0 {
-		p, err := freeRandomPort(used)
+		p, err := freeRandomInboundPort(used, portMin, portMax, usedNetwork)
 		if err != nil {
 			return nil, err
 		}
 		port = p
-	} else if used[port] {
-		return nil, fmt.Errorf("端口 %d 已被别的入站占用", port)
+	} else {
+		if used[port] {
+			return nil, fmt.Errorf("端口 %d 已被同类入站占用", port)
+		}
+		if !portAvailable(port, usedNetwork) {
+			return nil, fmt.Errorf("端口 %d 的 %s/%s 监听已被占用", port, usedNetwork, "IPv4+IPv6")
+		}
 	}
 
 	path := strings.TrimSpace(spec.Path)

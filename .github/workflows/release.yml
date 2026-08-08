@@ -32,7 +32,7 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           VERSION="${GITHUB_REF_NAME:-dev}"
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+          go build -trimpath -tags "netgo osusergo" -ldflags "-s -w -X main.version=${VERSION}" \
             -o fanout .
 
       - name: 打包

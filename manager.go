@@ -20,13 +20,17 @@ type Manager struct {
 	jobs       JobStore
 }
 
-func NewManager(maxSlots int, workDir string) *Manager {
+func NewManager(maxSlots int, workDir string, binary ...string) *Manager {
 	m := &Manager{
 		tunnels:  map[int]*Tunnel{},
 		workDir:  workDir,
 		maxSlots: maxSlots,
 	}
-	m.singBoxBin, _ = findSingBox(workDir)
+	if len(binary) > 0 && binary[0] != "" {
+		m.singBoxBin, _ = findSingBox(workDir, binary...)
+	} else {
+		m.singBoxBin, _ = findSingBox(workDir)
+	}
 	return m
 }
 

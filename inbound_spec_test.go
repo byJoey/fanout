@@ -31,7 +31,7 @@ func TestNormalizeInboundSpecGeneratesPath(t *testing.T) {
 }
 
 func TestNormalizeHysteria2DefaultsToUDPAndTLS(t *testing.T) {
-	ns, err := normalizeInboundSpec(NewInboundSpec{Protocol: "hysteria2", Port: 1234}, nil)
+	ns, err := normalizeInboundSpec(NewInboundSpec{Protocol: "hysteria2", Port: 51234}, nil)
 	if err != nil {
 		t.Fatalf("Hysteria2 默认值不应报错: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestNormalizeHysteria2DefaultsToUDPAndTLS(t *testing.T) {
 }
 
 func TestNormalizeTUICDefaultsToUDPAndTLS(t *testing.T) {
-	ns, err := normalizeInboundSpec(NewInboundSpec{Protocol: "tuic", Port: 1235}, nil)
+	ns, err := normalizeInboundSpec(NewInboundSpec{Protocol: "tuic", Port: 51235}, nil)
 	if err != nil {
 		t.Fatalf("TUIC 默认值不应报错: %v", err)
 	}
