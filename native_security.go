@@ -139,9 +139,20 @@ func certFingerprint(certFile string) (string, error) {
 
 // 支持的取值。集中在这里，前后端校验共用一份。
 var (
-	nativeNetworks   = map[string]bool{"tcp": true, "ws": true, "grpc": true, "httpupgrade": true}
+	nativeNetworks   = map[string]bool{"tcp": true, "ws": true, "grpc": true, "httpupgrade": true, "udp": true}
 	nativeSecurities = map[string]bool{"none": true, "tls": true, "reality": true}
 )
+
+func validateInboundListenAddr(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" || strings.EqualFold(addr, "all") {
+		return nil
+	}
+	if net.ParseIP(addr) == nil {
+		return fmt.Errorf("自建节点监听地址必须是 IP，例如 0.0.0.0 或 ::，当前为 %q", addr)
+	}
+	return nil
+}
 
 // visionCapable 判断能不能用 xtls-rprx-vision。
 //

@@ -73,15 +73,21 @@ func closePanel() {
 
 // panelState caches the sing-box gateway backend.
 var panelState struct {
-	mu      sync.Mutex
-	current Panel
-	workDir string
+	mu         sync.Mutex
+	current    Panel
+	workDir    string
+	listenAddr string
 }
 
 func configurePanel(workDir string) {
+	configurePanelWithListen(workDir, "0.0.0.0")
+}
+
+func configurePanelWithListen(workDir, listenAddr string) {
 	panelState.mu.Lock()
 	defer panelState.mu.Unlock()
 	panelState.workDir = workDir
+	panelState.listenAddr = listenAddr
 	panelState.current = nil
 }
 
@@ -94,7 +100,7 @@ func openPanel() (Panel, error) {
 		return panelState.current, nil
 	}
 
-	n, err := openNative(panelState.workDir)
+	n, err := openNative(panelState.workDir, panelState.listenAddr)
 	if err != nil {
 		return nil, err
 	}

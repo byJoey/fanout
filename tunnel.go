@@ -99,6 +99,12 @@ func (t *Tunnel) internalProxyAddr() (string, error) {
 	return fmt.Sprintf("127.0.0.1:%d", t.endpointPort), nil
 }
 
+func (t *Tunnel) internalProxyPort() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.endpointPort
+}
+
 func (t *Tunnel) dial(network, addr string) (net.Conn, error) {
 	if network != "tcp" && network != "tcp4" {
 		return nil, fmt.Errorf("只支持 TCP")

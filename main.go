@@ -19,9 +19,10 @@ var version = "dev"
 
 func main() {
 	var (
-		webPort  = flag.Int("web", 8899, "Web 管理端口")
-		maxSlots = flag.Int("max", 20, "最多同时运行的隧道数")
-		workDir  = flag.String("dir", "/var/lib/fanout", "工作目录")
+		webPort       = flag.Int("web", 8899, "Web 管理端口")
+		maxSlots      = flag.Int("max", 20, "最多同时运行的隧道数")
+		workDir       = flag.String("dir", "/var/lib/fanout", "工作目录")
+		inboundListen = flag.String("inbound-listen", "0.0.0.0", "自建节点监听地址；使用 :: 接收 IPv6/双栈连接")
 	)
 	publicIP := flag.String("ip", "", "母机公网 IPv4，用于分享链接/SOCKS5 地址；留空则自动探测")
 	showVersion := flag.Bool("version", false, "显示版本后退出")
@@ -49,7 +50,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	configurePanel(*workDir)
+	configurePanelWithListen(*workDir, *inboundListen)
 	if p, err := openPanel(); err != nil {
 		log.Printf("节点链接后端暂不可用（可在 Web 界面查看原因）: %v", err)
 	} else {

@@ -14,15 +14,23 @@ import (
 // 入站数据存在 native.json，sing-box 的运行配置每次改动后整份重新生成。
 // 全量重写比增量改省心：配置是纯函数产物，不会出现改了一半的中间态。
 type Native struct {
-	mu    sync.Mutex
-	dir   string
-	store *nativeStore
-	proc  *singBoxProc
+	mu         sync.Mutex
+	dir        string
+	listenAddr string
+	store      *nativeStore
+	proc       *singBoxProc
 }
 
-func openNative(workDir string) (*Native, error) {
+func openNative(workDir string, listen ...string) (*Native, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("自建模式缺少工作目录")
+	}
+	listenAddr := "0.0.0.0"
+	if len(listen) > 0 && strings.TrimSpace(listen[0]) != "" {
+		listenAddr = strings.TrimSpace(listen[0])
+	}
+	if err := validateInboundListenAddr(listenAddr); err != nil {
+		return nil, err
 	}
 	bin, err := findSingBox(workDir)
 	if err != nil {
@@ -46,9 +54,10 @@ func openNative(workDir string) (*Native, error) {
 		}
 	}
 	n := &Native{
-		dir:   workDir,
-		store: store,
-		proc:  &singBoxProc{bin: bin, dir: filepath.Join(workDir, "sing-box"), name: "gateway"},
+		dir:        workDir,
+		listenAddr: listenAddr,
+		store:      store,
+		proc:       &singBoxProc{bin: bin, dir: filepath.Join(workDir, "sing-box"), name: "gateway"},
 	}
 	// Stop a child left behind by an unclean fanout shutdown.
 	n.proc.reapOrphan()
@@ -62,7 +71,16 @@ func (n *Native) Describe() string { return "fanout 自建 sing-box (>=1.14)" }
 // apply 重新生成配置并重启 sing-box，然后落盘。
 // 调用方必须已持有 n.mu。
 func (n *Native) apply(tunnels []*Tunnel) error {
-	cfg := buildSingBoxGatewayConfig(n.store.sorted(), tunnels)
+	// Listen address is a runtime setting, not part of each client record.
+	// Render shallow copies so changing -inbound-listen also affects old entries.
+	list := n.store.sorted()
+	render := make([]*nativeInbound, 0, len(list))
+	for _, ib := range list {
+		copy := *ib
+		copy.Listen = n.listenAddr
+		render = append(render, &copy)
+	}
+	cfg := buildSingBoxGatewayConfig(render, tunnels)
 	path, err := writeSingBoxConfig(n.proc.dir, n.proc.name, cfg)
 	if err != nil {
 		return err
@@ -132,7 +150,7 @@ func (n *Native) InboundDetail(id int, publicHost string) (*InboundDetail, error
 	}
 	for _, c := range ib.Clients {
 		id := c.ID
-		if ib.Protocol == "trojan" {
+		if ib.Protocol == "trojan" || ib.Protocol == "hysteria2" {
 			id = c.Password
 		}
 		detail.Clients = append(detail.Clients, ClientInfo{Email: c.Email, ID: id, Enable: c.Enable})
@@ -450,7 +468,7 @@ type NewInboundSpec struct {
 }
 
 // nativeProtocols 是自建模式支持的协议，与前端下拉保持一致。
-var nativeProtocols = map[string]bool{"vless": true, "vmess": true, "trojan": true}
+var nativeProtocols = map[string]bool{"vless": true, "vmess": true, "trojan": true, "hysteria2": true, "tuic": true}
 
 // CreateInbound 新建一个入站，端口留空时随机分配。
 func (n *Native) CreateInbound(spec NewInboundSpec, tunnels []*Tunnel) (*CreatedInbound, error) {
@@ -533,8 +551,10 @@ func shareLink(ib *nativeInbound, c nativeClient, host string) string {
 	sec := ib.securityOrNone()
 
 	q := url.Values{}
-	q.Set("type", net)
-	q.Set("security", sec)
+	if ib.Protocol != "hysteria2" {
+		q.Set("type", net)
+		q.Set("security", sec)
+	}
 
 	switch net {
 	case "ws", "httpupgrade":
@@ -555,6 +575,9 @@ func shareLink(ib *nativeInbound, c nativeClient, host string) string {
 			// 自签证书需要靠指纹让客户端固定信任这一张。
 			if ib.TLS.SelfSigned && ib.TLS.CertSha256 != "" {
 				q.Set("pinSHA256", ib.TLS.CertSha256)
+			}
+			if ib.Protocol == "hysteria2" && ib.TLS.SelfSigned {
+				q.Set("insecure", "1")
 			}
 		}
 	case "reality":
@@ -580,6 +603,11 @@ func shareLink(ib *nativeInbound, c nativeClient, host string) string {
 	frag := url.PathEscape(ib.Remark)
 
 	switch ib.Protocol {
+	case "hysteria2":
+		return fmt.Sprintf("hysteria2://%s@%s:%d/?%s#%s", url.PathEscape(c.Password), host, ib.Port, q.Encode(), frag)
+	case "tuic":
+		q.Set("congestion_control", "cubic")
+		return fmt.Sprintf("tuic://%s:%s@%s:%d/?%s#%s", c.ID, url.PathEscape(c.Password), host, ib.Port, q.Encode(), frag)
 	case "trojan":
 		return fmt.Sprintf("trojan://%s@%s:%d?%s#%s", c.Password, host, ib.Port, q.Encode(), frag)
 	case "vmess":

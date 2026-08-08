@@ -44,6 +44,21 @@ OpenVPN endpoint 在 sing-box 1.14 中仍是预发布能力。生产使用前应
 
 服务用 systemd 或 OpenRC 都能装，装完自动开机自启。
 
+自建节点默认监听 IPv4 wildcard `0.0.0.0`。需要让 Hysteria2/TUIC 接收 IPv6 客户端时，
+启动参数改为：
+
+```bash
+./fanout -inbound-listen :: -web 8899 -dir /var/lib/fanout
+```
+
+Linux 默认会把 `::` 作为 IPv6 wildcard，并通常同时接受 IPv4-mapped 连接；如果系统开启了
+`net.ipv6.bindv6only=1`，它只会监听 IPv6，此时请改回 `0.0.0.0` 或调整系统 socket 策略。
+
+sing-box 可以选择 `ipv4_only` / `ipv6_only` DNS 解析，但不内置完整 NAT64/DNS64 网关。
+fanout 会让双栈域名优先走绑定的 IPv4 OpenVPN；IPv6-only 目标则绕过 VPN、直接走 VPS 的
+IPv6 出口。若 VPS 本身没有 IPv6，纯 IPv6 目标仍需在服务器或上游网络提供 Jool、Tayga
+或运营商 NAT64。
+
 **Alpine** 默认不带 bash，先装一下：
 
 ```bash
@@ -92,8 +107,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.s
 ### 节点链接从哪来
 
 fanout 自己运行 sing-box，界面提供「新建节点」按钮，可以选协议
-（VLESS / VMess / Trojan）、传输（TCP / WebSocket / gRPC / HTTPUpgrade）和安全层
-（无 / TLS / REALITY）。XHTTP 是 Xray 专有传输，不再支持；旧的 XHTTP 入站升级后会
+（VLESS / VMess / Trojan / Hysteria2 / TUIC）、传输（TCP / WebSocket / gRPC /
+HTTPUpgrade / UDP-QUIC）和安全层（无 / TLS / REALITY）。Hysteria2 与 TUIC 使用
+UDP/QUIC 且强制 TLS；VLESS / VMess / Trojan 仍使用 TCP 类传输。XHTTP 是 Xray 专有传输，不再支持；旧的 XHTTP 入站升级后会
 被禁用，需用其他传输重新创建。
 
 ![新建节点](https://images.joeyblog.net/2026/7/27/fanout-newnode.png)
@@ -139,7 +155,8 @@ f uninstall  # 卸载
 
 ## 已知限制
 
-- 只转发 TCP。
+- Hysteria2/TUIC 入站可以转发 TCP 和 UDP；出口通过每条隧道的 sing-box 内部 SOCKS
+  访问 OpenVPN。单独提供给用户的 fanout SOCKS5 端口仍只支持 TCP CONNECT。
 - VPN Gate 是志愿者节点，有相当比例已下线或满员（`AUTH_FAILED`）。
   启动时连不上会自动顺着同地区候选往下试，最多 6 个。
 - 管理界面只有随机路径 + 口令登录，没有 HTTPS。放公网建议前面套一层反代。

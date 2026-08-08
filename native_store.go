@@ -29,10 +29,11 @@ type nativeClient struct {
 type nativeInbound struct {
 	ID       int    `json:"id"`
 	Port     int    `json:"port"`
-	Protocol string `json:"protocol"` // vless | vmess | trojan
-	Network  string `json:"network"`  // tcp | ws | grpc | httpupgrade
-	Path     string `json:"path"`     // ws/httpupgrade 路径，grpc 用作 serviceName
-	Host     string `json:"host"`     // ws/httpupgrade 的 Host 头
+	Listen   string `json:"listen,omitempty"` // runtime override; empty means IPv4 wildcard
+	Protocol string `json:"protocol"`         // vless | vmess | trojan
+	Network  string `json:"network"`          // tcp | ws | grpc | httpupgrade | udp (hysteria2)
+	Path     string `json:"path"`             // ws/httpupgrade 路径，grpc 用作 serviceName
+	Host     string `json:"host"`             // ws/httpupgrade 的 Host 头
 	// Security 是传输层安全：none | tls | reality
 	Security string         `json:"security"`
 	TLS      *tlsConfig     `json:"tls,omitempty"`
@@ -78,6 +79,13 @@ func (n *nativeInbound) netOrTCP() string {
 		return "tcp"
 	}
 	return n.Network
+}
+
+func (n *nativeInbound) listenOrIPv4() string {
+	if strings.TrimSpace(n.Listen) == "" {
+		return "0.0.0.0"
+	}
+	return n.Listen
 }
 
 func (n *nativeInbound) securityOrNone() string {

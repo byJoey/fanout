@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -44,10 +48,16 @@ func TestBuildSingBoxConfigBindsOnlyLiveTunnels(t *testing.T) {
 	}
 
 	rules := cfg["route"].(map[string]any)["rules"].([]any)
-	if len(rules) != 1 {
-		t.Fatalf("只有绑到连通隧道的入站才该有规则，实际 %d 条", len(rules))
+	if len(rules) != 3 {
+		t.Fatalf("应有 resolve、IPv6 直连和一个隧道路由，实际 %d 条", len(rules))
 	}
-	if got := rules[0].(map[string]any)["outbound"]; got != "fanout-jp1" {
+	if resolve := rules[0].(map[string]any); resolve["action"] != "resolve" || resolve["strategy"] != "prefer_ipv4" {
+		t.Errorf("缺少双栈域名优先 IPv4 的解析规则: %#v", resolve)
+	}
+	if ipv6 := rules[1].(map[string]any); ipv6["ip_version"] != 6 || ipv6["outbound"] != "direct" {
+		t.Errorf("缺少 IPv6 目标直连规则: %#v", ipv6)
+	}
+	if got := rules[2].(map[string]any)["outbound"]; got != "fanout-jp1" {
 		t.Errorf("outbound = %v, want fanout-jp1", got)
 	}
 }
@@ -87,6 +97,24 @@ func TestShareLinkPerProtocol(t *testing.T) {
 	}
 	if !strings.Contains(tro, "path=%2Fp") {
 		t.Errorf("ws 链接要带 path: %s", tro)
+	}
+
+	h2 := shareLink(&nativeInbound{
+		Port: 300, Protocol: "hysteria2", Network: "udp", Security: "tls", Remark: "h2",
+		TLS: &tlsConfig{ServerName: "h2.example", SelfSigned: true},
+	}, nativeClient{Password: "h2-pass"}, "h")
+	if !strings.HasPrefix(h2, "hysteria2://h2-pass@h:300/?") {
+		t.Errorf("hysteria2 链接格式不对: %s", h2)
+	}
+	if !strings.Contains(h2, "sni=h2.example") || !strings.Contains(h2, "insecure=1") {
+		t.Errorf("hysteria2 TLS 参数缺失: %s", h2)
+	}
+	tuic := shareLink(&nativeInbound{
+		Port: 301, Protocol: "tuic", Network: "udp", Security: "tls", Remark: "tuic",
+		TLS: &tlsConfig{ServerName: "tuic.example"},
+	}, nativeClient{ID: "uuid", Password: "pw"}, "h")
+	if !strings.HasPrefix(tuic, "tuic://uuid:pw@h:301/?") || !strings.Contains(tuic, "congestion_control=cubic") {
+		t.Errorf("tuic 链接格式不对: %s", tuic)
 	}
 }
 
@@ -138,6 +166,77 @@ func TestSingBoxTransportPerNetwork(t *testing.T) {
 		if got := transport[c.wantKey]; got != c.want {
 			t.Errorf("%s 的 %s = %v, want %v", c.ib.Network, c.wantKey, got, c.want)
 		}
+	}
+}
+
+func TestSingBoxHysteria2Inbound(t *testing.T) {
+	ib := &nativeInbound{
+		Protocol: "hysteria2", Network: "udp", Port: 443, Listen: "::", Security: "tls",
+		TLS:     &tlsConfig{CertFile: "/x.crt", KeyFile: "/x.key"},
+		Clients: []nativeClient{{Password: "secret", Enable: true}},
+	}
+	cfg := singBoxInboundJSON(ib)
+	if cfg["type"] != "hysteria2" || cfg["listen_port"] != 443 {
+		t.Fatalf("Hysteria2 入站基本字段错误: %#v", cfg)
+	}
+	if cfg["listen"] != "::" {
+		t.Fatalf("Hysteria2 未使用 IPv6/双栈监听: %#v", cfg)
+	}
+	users := cfg["users"].([]any)
+	if len(users) != 1 || users[0].(map[string]any)["password"] != "secret" {
+		t.Fatalf("Hysteria2 用户密码未写入: %#v", users)
+	}
+	if _, ok := cfg["transport"]; ok {
+		t.Fatal("Hysteria2 不应生成 V2Ray transport")
+	}
+}
+
+func TestSingBoxTUICInbound(t *testing.T) {
+	ib := &nativeInbound{
+		Protocol: "tuic", Network: "udp", Port: 443, Security: "tls",
+		TLS:     &tlsConfig{CertFile: "/x.crt", KeyFile: "/x.key"},
+		Clients: []nativeClient{{ID: "uuid", Password: "secret", Enable: true}},
+	}
+	users := singBoxInboundJSON(ib)["users"].([]any)
+	user := users[0].(map[string]any)
+	if user["uuid"] != "uuid" || user["password"] != "secret" {
+		t.Fatalf("TUIC 用户凭据未写入: %#v", user)
+	}
+}
+
+func TestSingBoxCheckHysteria2Inbound(t *testing.T) {
+	bin := os.Getenv("FANOUT_SINGBOX_BIN")
+	if bin == "" {
+		t.Skip("设置 FANOUT_SINGBOX_BIN 后校验实际 sing-box 配置")
+	}
+	dir := t.TempDir()
+	cert, key, err := selfSignedCert(dir, "h2.local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := buildSingBoxGatewayConfig([]*nativeInbound{
+		{
+			Protocol: "hysteria2", Network: "udp", Port: 14443, Listen: "::", Security: "tls",
+			TLS:     &tlsConfig{CertFile: cert, KeyFile: key},
+			Clients: []nativeClient{{Password: "secret", Enable: true}},
+		},
+		{
+			Protocol: "tuic", Network: "udp", Port: 14444, Listen: "::", Security: "tls",
+			TLS:     &tlsConfig{CertFile: cert, KeyFile: key},
+			Clients: []nativeClient{{ID: newUUID(), Password: "secret2", Enable: true}},
+		},
+	}, nil)
+	blob, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hysteria2.json")
+	if err := os.WriteFile(path, blob, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin, "check", "-c", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sing-box check 失败: %v\n%s", err, out)
 	}
 }
 

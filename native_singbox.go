@@ -29,19 +29,36 @@ func buildSingBoxGatewayConfig(inbounds []*nativeInbound, tunnels []*Tunnel) map
 		if t.Status != "up" {
 			continue
 		}
-		cred := t.credential()
+		// Use the tunnel process' loopback SOCKS. It supports UDP and routes
+		// through the OpenVPN endpoint; the public fanout SOCKS remains TCP-only.
+		serverPort := t.internalProxyPort()
+		internal := serverPort != 0
+		if serverPort == 0 {
+			// A restored/test tunnel may not have initialized its child yet;
+			// retain the historical public SOCKS fallback for TCP compatibility.
+			serverPort = t.Port
+		}
 		out := map[string]any{
 			"type": "socks", "tag": tunnelTag(t),
-			"server": "127.0.0.1", "server_port": t.Port,
+			"server": "127.0.0.1", "server_port": serverPort,
 		}
-		if cred.User != "" {
-			out["username"] = cred.User
-			out["password"] = cred.Pass
+		if !internal {
+			cred := t.credential()
+			if cred.User != "" {
+				out["username"] = cred.User
+				out["password"] = cred.Pass
+			}
 		}
 		outs = append(outs, out)
 	}
 
-	rules := make([]any, 0, len(inbounds))
+	// Resolve domains before choosing the exit. Dual-stack names prefer IPv4
+	// and stay on the selected VPN, while IPv6-only names fall back to AAAA and
+	// bypass the IPv4-only VPN through the VPS' native direct outbound.
+	rules := []any{
+		map[string]any{"action": "resolve", "strategy": "prefer_ipv4"},
+		map[string]any{"ip_version": 6, "action": "route", "outbound": "direct"},
+	}
 	for _, inbound := range inbounds {
 		if !inbound.Enable || inbound.BoundTo == "" || !live[inbound.BoundTo] {
 			continue
@@ -70,8 +87,10 @@ func singBoxInboundJSON(inbound *nativeInbound) map[string]any {
 			continue
 		}
 		switch inbound.Protocol {
-		case "trojan":
+		case "trojan", "hysteria2":
 			users = append(users, map[string]any{"name": client.Email, "password": client.Password})
+		case "tuic":
+			users = append(users, map[string]any{"name": client.Email, "uuid": client.ID, "password": client.Password})
 		case "vmess":
 			users = append(users, map[string]any{"name": client.Email, "uuid": client.ID})
 		default:
@@ -85,7 +104,7 @@ func singBoxInboundJSON(inbound *nativeInbound) map[string]any {
 
 	result := map[string]any{
 		"type": inbound.Protocol, "tag": inbound.tag(),
-		"listen": "0.0.0.0", "listen_port": inbound.Port,
+		"listen": inbound.listenOrIPv4(), "listen_port": inbound.Port,
 		"users": users,
 	}
 	if transport := singBoxTransportJSON(inbound); transport != nil {

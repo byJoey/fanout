@@ -343,10 +343,16 @@ func buildTunnelSingBoxConfig(profile string, port int) (map[string]any, error) 
 		}},
 		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
 		"route": map[string]any{
-			"rules": []any{map[string]any{
-				"inbound": []string{"internal-socks"},
-				"action":  "route", "outbound": "vpn",
-			}},
+			// VPN Gate profiles and the userspace OpenVPN endpoint are IPv4-only.
+			// Resolve domains before routing so AAAA answers do not become an
+			// opaque SOCKS general-failure for clients using IPv6 test domains.
+			"rules": []any{
+				map[string]any{"action": "resolve", "strategy": "ipv4_only"},
+				map[string]any{
+					"inbound": []string{"internal-socks"},
+					"action":  "route", "outbound": "vpn",
+				},
+			},
 			"final": "direct",
 		},
 	}, nil

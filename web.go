@@ -296,6 +296,8 @@ textarea:focus{outline:none;border-color:var(--accent)}
           <option value="vless">VLESS</option>
           <option value="vmess">VMess</option>
           <option value="trojan">Trojan</option>
+          <option value="hysteria2">Hysteria2（UDP/QUIC）</option>
+          <option value="tuic">TUIC（UDP/QUIC）</option>
         </select>
       </label>
       <label class="f">
@@ -305,6 +307,7 @@ textarea:focus{outline:none;border-color:var(--accent)}
           <option value="ws">WebSocket</option>
           <option value="grpc">gRPC</option>
           <option value="httpupgrade">HTTPUpgrade</option>
+          <option value="udp">UDP/QUIC</option>
         </select>
       </label>
       <label class="f">
@@ -745,16 +748,24 @@ document.addEventListener('click', e => {
 // 表单随协议/传输/安全层联动：只露出当前组合真正用得到的字段
 function syncNodeForm(){
   const proto = $('#nproto').value;
-  const net   = $('#nnet').value;
-  const sec   = $('#nsec').value;
+  const netSel = $('#nnet');
+  const secSel = $('#nsec');
+  const hysteria = proto === 'hysteria2' || proto === 'tuic';
+  for(const o of netSel.options) o.hidden = hysteria ? o.value !== 'udp' : o.value === 'udp';
+  if(hysteria) netSel.value = 'udp';
+  else if(netSel.value === 'udp') netSel.value = 'tcp';
+  for(const o of secSel.options) o.hidden = hysteria ? o.value !== 'tls' : false;
+  if(hysteria) secSel.value = 'tls';
+
+  const net   = netSel.value;
+  const sec   = secSel.value;
 
   // REALITY 靠模仿 TLS 握手工作，套在自带头部的传输上没有意义
   const realityOK = net === 'tcp' || net === 'grpc';
-  const secSel = $('#nsec');
   for(const o of secSel.options){
-    if(o.value === 'reality') o.disabled = !realityOK;
+    if(o.value === 'reality') o.disabled = hysteria || !realityOK;
   }
-  if(secSel.value === 'reality' && !realityOK) secSel.value = 'none';
+  if(secSel.value === 'reality' && (!realityOK || hysteria)) secSel.value = hysteria ? 'tls' : 'none';
 
   const cur = secSel.value;
   $('#nsniwrap').hidden  = cur !== 'tls';
@@ -764,7 +775,7 @@ function syncNodeForm(){
 
   // Vision 只在 VLESS + 裸 TCP + TLS/REALITY 下有效
   const visionOK = proto === 'vless' && net === 'tcp' && cur !== 'none';
-  $('#nvisionwrap').hidden = !visionOK;
+  $('#nvisionwrap').hidden = !visionOK || hysteria;
   if(!visionOK) $('#nvision').checked = false;
 
   const needPath = net === 'ws' || net === 'httpupgrade' || net === 'grpc';

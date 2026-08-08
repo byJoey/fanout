@@ -30,6 +30,37 @@ func TestNormalizeInboundSpecGeneratesPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeHysteria2DefaultsToUDPAndTLS(t *testing.T) {
+	ns, err := normalizeInboundSpec(NewInboundSpec{Protocol: "hysteria2", Port: 1234}, nil)
+	if err != nil {
+		t.Fatalf("Hysteria2 默认值不应报错: %v", err)
+	}
+	if ns.Network != "udp" || ns.Security != "tls" {
+		t.Fatalf("Hysteria2 默认值错误: %+v", ns)
+	}
+}
+
+func TestNormalizeTUICDefaultsToUDPAndTLS(t *testing.T) {
+	ns, err := normalizeInboundSpec(NewInboundSpec{Protocol: "tuic", Port: 1235}, nil)
+	if err != nil {
+		t.Fatalf("TUIC 默认值不应报错: %v", err)
+	}
+	if ns.Network != "udp" || ns.Security != "tls" {
+		t.Fatalf("TUIC 默认值错误: %+v", ns)
+	}
+}
+
+func TestValidateInboundListenAddr(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0", "::", "127.0.0.1", "2001:db8::1"} {
+		if err := validateInboundListenAddr(addr); err != nil {
+			t.Errorf("监听地址 %q 应合法: %v", addr, err)
+		}
+	}
+	if err := validateInboundListenAddr("not-an-ip"); err == nil {
+		t.Fatal("非法监听地址应被拒绝")
+	}
+}
+
 func TestNormalizeInboundSpecRejects(t *testing.T) {
 	cases := []struct {
 		name string
@@ -43,6 +74,8 @@ func TestNormalizeInboundSpecRejects(t *testing.T) {
 		{"REALITY 配 ws", NewInboundSpec{Network: "ws", Security: "reality", Port: 1}, nil},
 		{"端口占用", NewInboundSpec{Port: 443}, map[int]bool{443: true}},
 		{"vision 配 ws", NewInboundSpec{Network: "ws", Security: "tls", Vision: true, Port: 1}, nil},
+		{"VLESS 不可直接声明 UDP 传输", NewInboundSpec{Protocol: "vless", Network: "udp", Port: 1}, nil},
+		{"Hysteria2 不可用明文", NewInboundSpec{Protocol: "hysteria2", Network: "udp", Security: "none", Port: 1}, nil},
 	}
 	for _, c := range cases {
 		if _, err := normalizeInboundSpec(c.spec, c.used); err == nil {

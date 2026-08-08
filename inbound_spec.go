@@ -32,17 +32,34 @@ func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSp
 	}
 	network := strings.ToLower(strings.TrimSpace(spec.Network))
 	if network == "" {
-		network = "tcp"
+		if proto == "hysteria2" || proto == "tuic" {
+			network = "udp"
+		} else {
+			network = "tcp"
+		}
 	}
 	if !nativeNetworks[network] {
 		return nil, fmt.Errorf("不支持的传输方式 %q", spec.Network)
 	}
+	if network == "udp" && proto != "hysteria2" && proto != "tuic" {
+		return nil, fmt.Errorf("UDP 传输目前只适用于 Hysteria2/TUIC 入站")
+	}
+	if (proto == "hysteria2" || proto == "tuic") && network != "udp" {
+		return nil, fmt.Errorf("%s 必须使用 UDP/QUIC 传输", proto)
+	}
 	security := strings.ToLower(strings.TrimSpace(spec.Security))
 	if security == "" {
-		security = "none"
+		if proto == "hysteria2" || proto == "tuic" {
+			security = "tls"
+		} else {
+			security = "none"
+		}
 	}
 	if !nativeSecurities[security] {
 		return nil, fmt.Errorf("不支持的安全层 %q", spec.Security)
+	}
+	if (proto == "hysteria2" || proto == "tuic") && security != "tls" {
+		return nil, fmt.Errorf("%s 必须启用 TLS", proto)
 	}
 	// REALITY cannot wrap WebSocket or HTTPUpgrade.
 	if security == "reality" && network != "tcp" && network != "grpc" {

@@ -105,7 +105,15 @@ func TestTunnelConfigRoutesInternalSocksToVPN(t *testing.T) {
 	if inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != 12345 {
 		t.Fatalf("内部 SOCKS 监听错误: %+v", inbound)
 	}
-	rule := cfg["route"].(map[string]any)["rules"].([]any)[0].(map[string]any)
+	rules := cfg["route"].(map[string]any)["rules"].([]any)
+	if len(rules) < 2 {
+		t.Fatalf("缺少 IPv4 resolve 与 VPN 路由规则: %#v", rules)
+	}
+	resolve := rules[0].(map[string]any)
+	if resolve["action"] != "resolve" || resolve["strategy"] != "ipv4_only" {
+		t.Fatalf("未强制 IPv4 DNS 解析: %+v", resolve)
+	}
+	rule := rules[1].(map[string]any)
 	if rule["outbound"] != "vpn" {
 		t.Fatalf("路由未指向 OpenVPN endpoint: %+v", rule)
 	}
