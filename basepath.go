@@ -68,7 +68,7 @@ func setBasePath(raw string) (string, error) {
 }
 
 // LoadBasePath 读取或生成随机访问路径，形如 /aB3xY9pQ。
-// 和 3x-ui 一样：路径本身也是一层门槛，扫端口的探不到界面。
+// 路径本身也是一层门槛，扫端口的探不到界面。
 func LoadBasePath(dir string) (string, bool, error) {
 	path := filepath.Join(dir, "basepath")
 

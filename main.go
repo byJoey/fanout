@@ -19,11 +19,12 @@ var version = "dev"
 
 func main() {
 	var (
-		webPort  = flag.Int("web", 8899, "Web 管理端口")
-		maxSlots = flag.Int("max", 20, "最多同时运行的隧道数")
-		workDir  = flag.String("dir", "/var/lib/fanout", "工作目录")
+		webPort       = flag.Int("web", 8899, "Web 管理端口")
+		maxSlots      = flag.Int("max", 20, "最多同时运行的隧道数")
+		workDir       = flag.String("dir", "/var/lib/fanout", "工作目录")
+		inboundListen = flag.String("inbound-listen", "0.0.0.0", "自建节点监听地址；使用 :: 接收 IPv6/双栈连接")
+		singBoxName   = flag.String("bin", "sing-box", "sing-box 二进制文件名（位于工作目录/bin，不支持路径）")
 	)
-	panelMode := flag.String("panel", "", "节点链接后端: 留空自动探测, 3x-ui, native")
 	publicIP := flag.String("ip", "", "母机公网 IPv4，用于分享链接/SOCKS5 地址；留空则自动探测")
 	showVersion := flag.Bool("version", false, "显示版本后退出")
 	flag.Parse()
@@ -37,19 +38,24 @@ func main() {
 		return
 	}
 
-	if os.Geteuid() != 0 {
-		log.Fatal("需要 root 权限（要创建 netns 和改 iptables）")
-	}
 	if err := os.MkdirAll(*workDir, 0700); err != nil {
 		log.Fatalf("创建工作目录失败: %v", err)
 	}
 	setPublicIPOverride(*publicIP)
 	go hostPublicIP() // 预热探测，别让首个请求阻塞
-	if err := prepareHost(); err != nil {
+	singBoxBin, err := findSingBox(*workDir, *singBoxName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := validateSingBox(singBoxBin); err != nil {
 		log.Fatal(err)
 	}
 
-	configurePanel(*workDir, *panelMode)
+	webCfg, err := loadWebSettings(*workDir, *webPort)
+	if err != nil {
+		log.Fatalf("加载 Web 设置失败: %v", err)
+	}
+	configurePanelWithListenRangeAndBin(*workDir, *inboundListen, webCfg.InboundPortMin, webCfg.InboundPortMax, *singBoxName)
 	if p, err := openPanel(); err != nil {
 		log.Printf("节点链接后端暂不可用（可在 Web 界面查看原因）: %v", err)
 	} else {
@@ -57,6 +63,9 @@ func main() {
 	}
 
 	mgr := NewManager(*maxSlots, *workDir)
+	// findSingBox above already resolved the configured filename to a concrete
+	// executable path; pass that path to tunnel workers directly.
+	mgr.singBoxBin = singBoxBin
 	log.Printf("正在拉取节点列表...")
 	if n, err := mgr.RefreshNodes(); err != nil {
 		log.Printf("拉取失败（可在 Web 界面重试）: %v", err)
@@ -68,10 +77,10 @@ func main() {
 		log.Printf("恢复上次状态失败: %v", err)
 	} else if n > 0 {
 		log.Printf("正在恢复上次的 %d 条隧道", n)
-		// 3x-ui 模式重启不会自动重写面板出站，旧版本升上来时面板里的 socks
-		// 出站没有认证字段，端口一旦要认证就连不上，这里恢复后对账一次
-		go mgr.ReconcileOutbounds()
 	}
+	// Start persisted direct inbounds even when there are no VPN exits. Restored
+	// tunnels will trigger another refresh as each endpoint becomes ready.
+	mgr.notifyPanel()
 
 	go mgr.WatchHealth()
 
@@ -128,11 +137,6 @@ func main() {
 		log.Printf("已生成访问路径，见 %s", filepath.Join(*workDir, "basepath"))
 	}
 
-	webCfg, err := loadWebSettings(*workDir, *webPort)
-	if err != nil {
-		log.Fatalf("加载 Web 设置失败: %v", err)
-	}
-
 	srv := newWebServer(StripBasePath(auth.Wrap(mux)))
 	// 设置面板：改密码 / 改路径 / 改端口 / 改本地监听。
 	mux.HandleFunc("/api/settings", apiSettings(auth, srv))
@@ -140,7 +144,7 @@ func main() {
 	mux.HandleFunc("/api/update/apply", apiUpdateApply)
 
 	log.Printf("管理界面: http://<本机IP>%s%s/", webCfg.listenAddrString(), currentBasePath())
-	log.Printf("SOCKS5 端口在 %d-%d 之间随机分配", randPortMin, randPortMax)
+	log.Printf("SOCKS5 端口在 %d-%d 之间随机分配；入站随机端口范围 %d-%d", randPortMin, randPortMax, webCfg.InboundPortMin, webCfg.InboundPortMax)
 	if err := srv.serve(); err != nil {
 		log.Fatal(err)
 	}
@@ -271,10 +275,12 @@ func apiCred(m *Manager) http.HandlerFunc {
 // GET 返回当前值（不含明文口令）；POST 按传入的字段逐项应用，任一项失败即整体回报。
 func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 	type settingsReq struct {
-		Password   *string `json:"password"`    // 非空则改口令
-		BasePath   *string `json:"base_path"`   // 提供即改访问路径（空串=去掉前缀）
-		Port       *int    `json:"port"`        // 提供即改监听端口
-		ListenAddr *string `json:"listen_addr"` // 提供即改监听地址
+		Password       *string `json:"password"`    // 非空则改口令
+		BasePath       *string `json:"base_path"`   // 提供即改访问路径（空串=去掉前缀）
+		Port           *int    `json:"port"`        // 提供即改监听端口
+		ListenAddr     *string `json:"listen_addr"` // 提供即改监听地址
+		InboundPortMin *int    `json:"inbound_port_min"`
+		InboundPortMax *int    `json:"inbound_port_max"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -312,6 +318,32 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 					return
 				}
 			}
+			if in.InboundPortMin != nil || in.InboundPortMax != nil {
+				next := getWebSettings()
+				if in.InboundPortMin != nil {
+					next.InboundPortMin = *in.InboundPortMin
+				}
+				if in.InboundPortMax != nil {
+					next.InboundPortMax = *in.InboundPortMax
+				}
+				if err := validatePortRange(next.InboundPortMin, next.InboundPortMax); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				p, err := openPanel()
+				if err != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := p.SetInboundPortRange(next.InboundPortMin, next.InboundPortMax); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := setInboundPortRangeSettings(next.InboundPortMin, next.InboundPortMax); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+			}
 		}
 
 		cfg := getWebSettings()
@@ -320,11 +352,13 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 			listen = "0.0.0.0"
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"base_path":    currentBasePath(),
-			"port":         cfg.Port,
-			"listen_addr":  listen,
-			"has_password": true,
-			"version":      version,
+			"base_path":        currentBasePath(),
+			"port":             cfg.Port,
+			"listen_addr":      listen,
+			"inbound_port_min": cfg.InboundPortMin,
+			"inbound_port_max": cfg.InboundPortMax,
+			"has_password":     true,
+			"version":          version,
 		})
 	}
 }
@@ -409,7 +443,7 @@ func apiJobDismiss(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiXUIStatus 报告当前的节点链接后端：接管的 3x-ui，或 fanout 自己跑的 Xray。
+// apiXUIStatus reports the local sing-box inbound manager.
 func apiXUIStatus(w http.ResponseWriter, r *http.Request) {
 	p, err := openPanel()
 	if err != nil {
@@ -420,22 +454,15 @@ func apiXUIStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"available": true,
-		"kind":      p.Kind(),
-		"describe":  p.Describe(),
-		// 两种后端都能建入站：自建模式写自己的库，3x-ui 走面板的 inbounds/add API
+		"available":  true,
+		"kind":       p.Kind(),
+		"describe":   p.Describe(),
 		"can_create": true,
-	}
-	if x, ok := p.(*XUI); ok {
-		resp["port"] = x.Port
-		resp["base_path"] = x.BasePath
-		resp["scheme"] = x.Scheme
-		resp["host"] = x.Host
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// apiXUIInbounds 列出面板里已有的入站及其绑定状态。
+// apiXUIInbounds lists managed inbounds and their bindings.
 func apiXUIInbounds(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		list, err := cachedInbounds(liveHosts(m))
@@ -458,7 +485,7 @@ func liveHosts(m *Manager) map[string]bool {
 	return live
 }
 
-// apiXUIBind 把某个入站绑定到某条隧道，slot=0 表示解绑。
+// apiXUIBind binds an inbound to one tunnel; an empty host unbinds it.
 func apiXUIBind(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tag := r.URL.Query().Get("tag")
@@ -481,7 +508,7 @@ func apiXUIBind(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiXUIClone 以某个入站为模板，为所有已连通的隧道各复制一个入站并绑好出口。
+// apiXUIClone copies an inbound to selected live tunnels.
 func apiXUIClone(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(r.URL.Query().Get("id"))
@@ -526,7 +553,7 @@ func apiXUIClone(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiXUIDetail 返回某个入站的详情，含客户端与可直接复制的分享链接。
+// apiXUIDetail returns an inbound, its clients, and share links.
 func apiXUIDetail(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.URL.Query().Get("id"))
 	if err != nil {
@@ -636,9 +663,7 @@ func apiXUIDelete(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiInboundCreate 新建一个入站。两种后端都支持：自建模式写自己的库，
-// 接管 3x-ui 时走面板的 inbounds/add API。
-// apiInboundUpdate 改入站的端口、备注与启停。两种后端都支持。
+// apiInboundUpdate changes an inbound's port, remark, or enabled state.
 func apiInboundUpdate(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := openPanel()

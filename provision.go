@@ -12,13 +12,13 @@ import (
 type ProvisionRequest struct {
 	Region     string // 国家码，空表示不限
 	Count      int
-	TemplateID int // 3x-ui 入站模板；0 表示只开隧道不建入站
+	TemplateID int // 入站模板；0 表示只开隧道不建入站
 }
 
 // Provision 异步执行一次批量开出口，立刻返回作业句柄供界面轮询。
 //
-// 隧道并行拉起（每条都要等 openvpn 握手，串行会线性累加等待），
-// 面板侧的入站创建则统一放到最后串行做一次，因为每次改路由都要重启 Xray。
+// 隧道并行拉起（每条都要等 OpenVPN 握手，串行会线性累加等待），
+// 入站复制统一放在最后串行执行，因为每次都会重启 sing-box 网关。
 func (m *Manager) Provision(req ProvisionRequest) (*Job, error) {
 	if req.Count < 1 {
 		return nil, fmt.Errorf("数量至少为 1")
@@ -106,7 +106,7 @@ func (m *Manager) runProvision(job *Job, picks []Node, templateID int) {
 }
 
 // waitUp 等一条隧道跑完 bringUp。bringUp 最多试 6 个候选节点，
-// 每个节点等 tun0 最长 40 秒，所以这里给足余量。
+// 每个节点等 OpenVPN endpoint 最长 40 秒，所以这里给足余量。
 func (m *Manager) waitUp(t *Tunnel) {
 	const maxWait = 5 * time.Minute
 	deadline := time.Now().Add(maxWait)

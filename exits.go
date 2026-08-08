@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ExitInbound 是挂在某个出口上的一个 3x-ui 入站。
+// ExitInbound is an inbound attached to one exit.
 type ExitInbound struct {
 	ID       int    `json:"id"`
 	Port     int    `json:"port"`
@@ -39,8 +39,7 @@ type ExitsView struct {
 	// Direct 是没绑到任何出口的入站，仍然要能看见，否则用户会以为它们不见了
 	Direct []ExitInbound `json:"direct"`
 	Panel  string        `json:"panel"` // 面板不可用时的原因，空表示正常
-	// Backend 是 "3x-ui" 或 "native"。界面据此决定是否提供新建入站入口：
-	// 接管面板时入站归面板管，自建模式才由 fanout 自己建。
+	// Backend identifies the local sing-box manager.
 	Backend string `json:"backend"`
 	// PanelInfo 是后端的一行说明，显示在标题旁
 	PanelInfo string `json:"panel_info"`
@@ -49,7 +48,7 @@ type ExitsView struct {
 }
 
 // inboundCache 给入站列表做很短的缓存。界面每几秒轮询一次，
-// 而每次读入站都要顺带解析一遍完整的 Xray 配置，没必要每次都真的去问面板。
+// Frequent UI polling should not repeatedly load the complete inbound store.
 type inboundCache struct {
 	mu   sync.Mutex
 	at   time.Time

@@ -19,20 +19,21 @@ type nativeClient struct {
 	Password string `json:"password"` // trojan 用密码
 	Enable   bool   `json:"enable"`
 	// Flow 只对 VLESS 有意义，取值 "" 或 xtls-rprx-vision。
-	// Vision 要求底层是 TCP + TLS/REALITY，其他组合下 Xray 会直接拒绝启动。
+	// Vision 要求底层是 TCP + TLS/REALITY。
 	Flow string `json:"flow,omitempty"`
 }
 
 // nativeInbound 是自建模式下的一个入站。
 //
-// 字段刻意贴着 3x-ui 的入站语义，这样两种后端在界面上表现一致。
+// Fields mirror the UI's inbound model.
 type nativeInbound struct {
 	ID       int    `json:"id"`
 	Port     int    `json:"port"`
-	Protocol string `json:"protocol"` // vless | vmess | trojan
-	Network  string `json:"network"`  // tcp | ws | grpc | httpupgrade | xhttp
-	Path     string `json:"path"`     // ws/httpupgrade/xhttp 路径，grpc 用作 serviceName
-	Host     string `json:"host"`     // ws/httpupgrade/xhttp 的 Host 头
+	Listen   string `json:"listen,omitempty"` // runtime override; empty means IPv4 wildcard
+	Protocol string `json:"protocol"`         // vless | vmess | trojan
+	Network  string `json:"network"`          // tcp | ws | grpc | httpupgrade | udp (hysteria2)
+	Path     string `json:"path"`             // ws/httpupgrade 路径，grpc 用作 serviceName
+	Host     string `json:"host"`             // ws/httpupgrade 的 Host 头
 	// Security 是传输层安全：none | tls | reality
 	Security string         `json:"security"`
 	TLS      *tlsConfig     `json:"tls,omitempty"`
@@ -52,8 +53,7 @@ type tlsConfig struct {
 	// SelfSigned 记录证书是 fanout 生成的，分享链接要带 allowInsecure
 	SelfSigned bool `json:"self_signed"`
 	// CertSha256 是证书的 SHA-256 指纹（十六进制）。
-	// 自签证书客户端验不过，Xray 26.x 起 allowInsecure 已被移除，
-	// 改为在链接里带指纹让客户端固定信任这一张证书。
+	// 自签证书通过分享链接里的指纹建立信任。
 	CertSha256 string `json:"cert_sha256,omitempty"`
 }
 
@@ -69,7 +69,7 @@ type realityConfig struct {
 	Fingerprint string   `json:"fingerprint"` // 客户端指纹，如 chrome
 }
 
-// tag 复原这个入站在 Xray 里的 inboundTag，格式与 3x-ui 保持一致。
+// tag identifies this inbound in sing-box routing rules.
 func (n *nativeInbound) tag() string {
 	return fmt.Sprintf("in-%d-%s", n.Port, n.netOrTCP())
 }
@@ -79,6 +79,13 @@ func (n *nativeInbound) netOrTCP() string {
 		return "tcp"
 	}
 	return n.Network
+}
+
+func (n *nativeInbound) listenOrIPv4() string {
+	if strings.TrimSpace(n.Listen) == "" {
+		return "0.0.0.0"
+	}
+	return n.Listen
 }
 
 func (n *nativeInbound) securityOrNone() string {
@@ -135,9 +142,12 @@ func (s *nativeStore) byID(id int) *nativeInbound {
 	return nil
 }
 
-func (s *nativeStore) usedPorts() map[int]bool {
+func (s *nativeStore) usedPorts(network ...string) map[int]bool {
 	used := map[int]bool{}
 	for _, ib := range s.Inbounds {
+		if len(network) > 0 && network[0] != "" && ib.netOrTCP() != network[0] {
+			continue
+		}
 		used[ib.Port] = true
 	}
 	return used
@@ -151,7 +161,7 @@ func (s *nativeStore) sorted() []*nativeInbound {
 	return out
 }
 
-// newUUID 生成 Xray 认的 UUID v4。
+// newUUID creates a UUID v4 accepted by VLESS and VMess.
 func newUUID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

@@ -43,6 +43,27 @@ func TestValidatePort(t *testing.T) {
 	}
 }
 
+func TestInboundPortRangeDefaultsAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := loadWebSettings(dir, 8899)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InboundPortMin != 50000 || cfg.InboundPortMax != 60000 {
+		t.Fatalf("默认入站端口范围错误: %d-%d", cfg.InboundPortMin, cfg.InboundPortMax)
+	}
+	for _, pair := range [][2]int{{1, 1}, {50000, 60000}, {65535, 65535}} {
+		if err := validatePortRange(pair[0], pair[1]); err != nil {
+			t.Errorf("合法范围 %v 被拒绝: %v", pair, err)
+		}
+	}
+	for _, pair := range [][2]int{{0, 1}, {60000, 50000}, {1, 65536}} {
+		if err := validatePortRange(pair[0], pair[1]); err == nil {
+			t.Errorf("非法范围 %v 未被拒绝", pair)
+		}
+	}
+}
+
 func TestSetBasePathValidatesAndPersists(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := initBasePath(dir); err != nil {

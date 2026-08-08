@@ -107,9 +107,6 @@ show_info() {
   echo -e "  ${B}访问口令  ${pw}${N}"
   echo
 
-  local n
-  n=$(ls -d /var/run/netns/fo* 2>/dev/null | wc -l | tr -d ' ')
-  echo -e "  ${D}运行中的隧道: ${n}${N}"
 }
 
 list_tunnels() {
@@ -274,13 +271,6 @@ do_uninstall() {
 
   svc_stop >/dev/null 2>&1
   svc_disable
-  # 清掉残留的 netns 与 veth
-  for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep '^fo[0-9]'); do
-    ip netns del "$ns" 2>/dev/null
-  done
-  for l in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep '^fov[0-9]'); do
-    ip link del "$l" 2>/dev/null
-  done
   rm -f "$UNIT" "$BIN" /usr/local/bin/f
   rm -rf "$WORK_DIR"
   svc_reload

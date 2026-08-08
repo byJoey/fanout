@@ -8,7 +8,7 @@ Type=simple
 ExecStart=/usr/local/bin/fanout -web 8899 -dir /var/lib/fanout
 Restart=on-failure
 RestartSec=5
-# 退出时给足时间清理 netns 与 openvpn 子进程
+# 退出时给足时间清理 sing-box 子进程
 TimeoutStopSec=30
 KillMode=mixed
 

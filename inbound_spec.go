@@ -6,7 +6,7 @@ import (
 )
 
 // normalizedSpec 是 NewInboundSpec 过完校验、补完默认值之后的样子。
-// 两种后端都从这里出发：自建模式落成 nativeInbound，3x-ui 模式转成面板的 add 载荷。
+// The normalized form is persisted as a nativeInbound and rendered as sing-box JSON.
 type normalizedSpec struct {
 	Protocol string
 	Network  string
@@ -21,9 +21,12 @@ type normalizedSpec struct {
 // normalizeInboundSpec 校验协议组合并补上默认值。
 //
 // used 是已被占用的端口集合；端口留空时从中避开随机挑一个。
-// 这段逻辑对两种后端完全一致，所以从 Native.CreateInbound 里抽出来共用，
-// 免得 3x-ui 那边再写一份走样的校验。
-func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSpec, error) {
+// Keeping validation separate from persistence also makes protocol combinations testable.
+func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool, portRange ...int) (*normalizedSpec, error) {
+	portMin, portMax := inboundPortMinDefault, inboundPortMaxDefault
+	if len(portRange) == 2 {
+		portMin, portMax = portRange[0], portRange[1]
+	}
 	proto := strings.ToLower(strings.TrimSpace(spec.Protocol))
 	if proto == "" {
 		proto = "vless"
@@ -33,41 +36,63 @@ func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSp
 	}
 	network := strings.ToLower(strings.TrimSpace(spec.Network))
 	if network == "" {
-		network = "tcp"
+		if proto == "hysteria2" || proto == "tuic" {
+			network = "udp"
+		} else {
+			network = "tcp"
+		}
 	}
 	if !nativeNetworks[network] {
 		return nil, fmt.Errorf("不支持的传输方式 %q", spec.Network)
 	}
+	if network == "udp" && proto != "hysteria2" && proto != "tuic" {
+		return nil, fmt.Errorf("UDP 传输目前只适用于 Hysteria2/TUIC 入站")
+	}
+	if (proto == "hysteria2" || proto == "tuic") && network != "udp" {
+		return nil, fmt.Errorf("%s 必须使用 UDP/QUIC 传输", proto)
+	}
 	security := strings.ToLower(strings.TrimSpace(spec.Security))
 	if security == "" {
-		security = "none"
+		if proto == "hysteria2" || proto == "tuic" {
+			security = "tls"
+		} else {
+			security = "none"
+		}
 	}
 	if !nativeSecurities[security] {
 		return nil, fmt.Errorf("不支持的安全层 %q", spec.Security)
 	}
-	// REALITY 靠模仿 TLS 握手工作，套在 ws/grpc 这类已有自己头部的传输上没有意义，
-	// Xray 也不接受这种组合
-	if security == "reality" && network != "tcp" && network != "xhttp" && network != "grpc" {
+	if (proto == "hysteria2" || proto == "tuic") && security != "tls" {
+		return nil, fmt.Errorf("%s 必须启用 TLS", proto)
+	}
+	// REALITY cannot wrap WebSocket or HTTPUpgrade.
+	if security == "reality" && network != "tcp" && network != "grpc" {
 		return nil, fmt.Errorf("REALITY 不支持 %s 传输", network)
 	}
 	// VMess 自带加密，但 TLS 在这里是为了流量伪装而不是加密强度，
 	// vmess+ws+tls 是很常见的组合，不该拦。
 
 	port := spec.Port
+	usedNetwork := network
 	if port == 0 {
-		p, err := freeRandomPort(used)
+		p, err := freeRandomInboundPort(used, portMin, portMax, usedNetwork)
 		if err != nil {
 			return nil, err
 		}
 		port = p
-	} else if used[port] {
-		return nil, fmt.Errorf("端口 %d 已被别的入站占用", port)
+	} else {
+		if used[port] {
+			return nil, fmt.Errorf("端口 %d 已被同类入站占用", port)
+		}
+		if !portAvailable(port, usedNetwork) {
+			return nil, fmt.Errorf("端口 %d 的 %s/%s 监听已被占用", port, usedNetwork, "IPv4+IPv6")
+		}
 	}
 
 	path := strings.TrimSpace(spec.Path)
 	if path == "" {
 		switch network {
-		case "ws", "httpupgrade", "xhttp":
+		case "ws", "httpupgrade":
 			path = "/" + randomHex(6)
 		case "grpc":
 			path = randomHex(6)

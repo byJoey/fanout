@@ -296,6 +296,8 @@ textarea:focus{outline:none;border-color:var(--accent)}
           <option value="vless">VLESS</option>
           <option value="vmess">VMess</option>
           <option value="trojan">Trojan</option>
+          <option value="hysteria2">Hysteria2（UDP/QUIC）</option>
+          <option value="tuic">TUIC（UDP/QUIC）</option>
         </select>
       </label>
       <label class="f">
@@ -305,7 +307,7 @@ textarea:focus{outline:none;border-color:var(--accent)}
           <option value="ws">WebSocket</option>
           <option value="grpc">gRPC</option>
           <option value="httpupgrade">HTTPUpgrade</option>
-          <option value="xhttp">XHTTP</option>
+          <option value="udp">UDP/QUIC</option>
         </select>
       </label>
       <label class="f">
@@ -458,6 +460,14 @@ textarea:focus{outline:none;border-color:var(--accent)}
       </div>
       <div class="hint bad" id="setPortHint">改端口或监听地址会切换监听，保存后要用新地址重新打开界面。</div>
 
+      <div class="setrow">
+        <label class="f" style="margin:0"><span>入站端口起始</span>
+          <input id="setInboundMin" type="text" inputmode="numeric" spellcheck="false"></label>
+        <label class="f" style="margin:0"><span>入站端口结束</span>
+          <input id="setInboundMax" type="text" inputmode="numeric" spellcheck="false"></label>
+      </div>
+      <div class="hint">留空端口时，从此范围随机分配；默认 50000-60000。已有入站端口不会改变。</div>
+
       <div class="updsec">
         <div class="updrow">
           <div class="updver">版本 <b id="updCur">-</b><span id="updLatest"></span></div>
@@ -538,10 +548,8 @@ async function copy(text){
 let view = {exits:[], direct:[], panel:'', backend:'', public_ip:''};
 let inbounds = [];
 
-// 自建模式下入站由 fanout 自己管，界面要提供新建入口；
-// 接管 3x-ui 时入站归面板管，这里只读不写。
 function isNative(){ return view.backend === 'native'; }
-function backendName(){ return isNative() ? '自建 Xray' : '3x-ui'; }
+function backendName(){ return '自建 sing-box'; }
 
 const STATUS = {up:'已连通', starting:'连接中', failed:'失败', stopped:'已停止'};
 
@@ -748,16 +756,24 @@ document.addEventListener('click', e => {
 // 表单随协议/传输/安全层联动：只露出当前组合真正用得到的字段
 function syncNodeForm(){
   const proto = $('#nproto').value;
-  const net   = $('#nnet').value;
-  const sec   = $('#nsec').value;
+  const netSel = $('#nnet');
+  const secSel = $('#nsec');
+  const hysteria = proto === 'hysteria2' || proto === 'tuic';
+  for(const o of netSel.options) o.hidden = hysteria ? o.value !== 'udp' : o.value === 'udp';
+  if(hysteria) netSel.value = 'udp';
+  else if(netSel.value === 'udp') netSel.value = 'tcp';
+  for(const o of secSel.options) o.hidden = hysteria ? o.value !== 'tls' : false;
+  if(hysteria) secSel.value = 'tls';
+
+  const net   = netSel.value;
+  const sec   = secSel.value;
 
   // REALITY 靠模仿 TLS 握手工作，套在自带头部的传输上没有意义
-  const realityOK = net === 'tcp' || net === 'xhttp' || net === 'grpc';
-  const secSel = $('#nsec');
+  const realityOK = net === 'tcp' || net === 'grpc';
   for(const o of secSel.options){
-    if(o.value === 'reality') o.disabled = !realityOK;
+    if(o.value === 'reality') o.disabled = hysteria || !realityOK;
   }
-  if(secSel.value === 'reality' && !realityOK) secSel.value = 'none';
+  if(secSel.value === 'reality' && (!realityOK || hysteria)) secSel.value = hysteria ? 'tls' : 'none';
 
   const cur = secSel.value;
   $('#nsniwrap').hidden  = cur !== 'tls';
@@ -767,10 +783,10 @@ function syncNodeForm(){
 
   // Vision 只在 VLESS + 裸 TCP + TLS/REALITY 下有效
   const visionOK = proto === 'vless' && net === 'tcp' && cur !== 'none';
-  $('#nvisionwrap').hidden = !visionOK;
+  $('#nvisionwrap').hidden = !visionOK || hysteria;
   if(!visionOK) $('#nvision').checked = false;
 
-  const needPath = net === 'ws' || net === 'httpupgrade' || net === 'xhttp' || net === 'grpc';
+  const needPath = net === 'ws' || net === 'httpupgrade' || net === 'grpc';
   $('#npathwrap').hidden = !needPath;
   $('#npathlabel').textContent = net === 'grpc' ? '服务名' : '路径';
 
@@ -912,7 +928,7 @@ async function openDetail(id){
   }
 }
 
-// 出口下拉：列出所有已连通的隧道，外加"直连"。绑定按 Xray 的 inboundTag 走。
+// 出口下拉：列出所有已连通的隧道，外加"直连"。
 function exitOptions(currentHost){
   const up = view.exits.filter(e => e.status === 'up');
   return '<option value=""' + (currentHost ? '' : ' selected') + '>直连（不走隧道）</option>'
@@ -1163,6 +1179,8 @@ $('#settingsBtn').onclick = async () => {
     $('#setPath').value = (s.base_path || '').replace(/^\//, '');
     $('#setPort').value = s.port || '';
     $('#setListen').value = s.listen_addr || '0.0.0.0';
+    $('#setInboundMin').value = s.inbound_port_min || 50000;
+    $('#setInboundMax').value = s.inbound_port_max || 60000;
     $('#setPathHint').textContent = '界面挂在这个路径下，扫端口的探不到。只能用字母数字和 - _。';
     $('#updCur').textContent = s.version || '-';
     $('#updLatest').textContent = '';
@@ -1234,8 +1252,12 @@ $('#setSave').onclick = async e => {
   if(pw) body.password = pw;
   body.base_path = $('#setPath').value.trim();
   const port = parseInt($('#setPort').value.trim(), 10);
+  const inboundMin = parseInt($('#setInboundMin').value.trim(), 10);
+  const inboundMax = parseInt($('#setInboundMax').value.trim(), 10);
   if(port) body.port = port;
   body.listen_addr = $('#setListen').value;
+  body.inbound_port_min = inboundMin;
+  body.inbound_port_max = inboundMax;
 
   const portChanged = curSettings && (port !== curSettings.port
     || body.listen_addr !== (curSettings.listen_addr || '0.0.0.0'));
