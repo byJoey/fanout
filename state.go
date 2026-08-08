@@ -8,7 +8,7 @@ import (
 )
 
 // persistedTunnel 是隧道在磁盘上的形态。
-// 只存重建所需的信息，运行态（netns、进程、监听）重启后重新建立。
+// 只存重建所需的信息，运行态（进程、监听）重启后重新建立。
 type persistedTunnel struct {
 	Slot        int    `json:"slot"`
 	Port        int    `json:"port"`

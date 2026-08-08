@@ -305,7 +305,6 @@ textarea:focus{outline:none;border-color:var(--accent)}
           <option value="ws">WebSocket</option>
           <option value="grpc">gRPC</option>
           <option value="httpupgrade">HTTPUpgrade</option>
-          <option value="xhttp">XHTTP</option>
         </select>
       </label>
       <label class="f">
@@ -538,10 +537,8 @@ async function copy(text){
 let view = {exits:[], direct:[], panel:'', backend:'', public_ip:''};
 let inbounds = [];
 
-// 自建模式下入站由 fanout 自己管，界面要提供新建入口；
-// 接管 3x-ui 时入站归面板管，这里只读不写。
 function isNative(){ return view.backend === 'native'; }
-function backendName(){ return isNative() ? '自建 Xray' : '3x-ui'; }
+function backendName(){ return '自建 sing-box'; }
 
 const STATUS = {up:'已连通', starting:'连接中', failed:'失败', stopped:'已停止'};
 
@@ -752,7 +749,7 @@ function syncNodeForm(){
   const sec   = $('#nsec').value;
 
   // REALITY 靠模仿 TLS 握手工作，套在自带头部的传输上没有意义
-  const realityOK = net === 'tcp' || net === 'xhttp' || net === 'grpc';
+  const realityOK = net === 'tcp' || net === 'grpc';
   const secSel = $('#nsec');
   for(const o of secSel.options){
     if(o.value === 'reality') o.disabled = !realityOK;
@@ -770,7 +767,7 @@ function syncNodeForm(){
   $('#nvisionwrap').hidden = !visionOK;
   if(!visionOK) $('#nvision').checked = false;
 
-  const needPath = net === 'ws' || net === 'httpupgrade' || net === 'xhttp' || net === 'grpc';
+  const needPath = net === 'ws' || net === 'httpupgrade' || net === 'grpc';
   $('#npathwrap').hidden = !needPath;
   $('#npathlabel').textContent = net === 'grpc' ? '服务名' : '路径';
 
@@ -912,7 +909,7 @@ async function openDetail(id){
   }
 }
 
-// 出口下拉：列出所有已连通的隧道，外加"直连"。绑定按 Xray 的 inboundTag 走。
+// 出口下拉：列出所有已连通的隧道，外加"直连"。
 function exitOptions(currentHost){
   const up = view.exits.filter(e => e.status === 'up');
   return '<option value=""' + (currentHost ? '' : ' selected') + '>直连（不走隧道）</option>'

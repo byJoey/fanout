@@ -4,58 +4,70 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
-// Native 是 fanout 自己跑 Xray 的后端，用在本机没装 3x-ui 的场合。
+// Native is fanout's sing-box-backed inbound manager.
 //
-// 入站数据存在 native.json，Xray 的运行配置每次改动后整份重新生成。
+// 入站数据存在 native.json，sing-box 的运行配置每次改动后整份重新生成。
 // 全量重写比增量改省心：配置是纯函数产物，不会出现改了一半的中间态。
 type Native struct {
 	mu    sync.Mutex
 	dir   string
 	store *nativeStore
-	proc  *xrayProc
+	proc  *singBoxProc
 }
 
 func openNative(workDir string) (*Native, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("自建模式缺少工作目录")
 	}
-	bin, err := findXray(workDir)
+	bin, err := findSingBox(workDir)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateSingBox(bin); err != nil {
 		return nil, err
 	}
 	store, err := loadNativeStore(workDir)
 	if err != nil {
 		return nil, err
 	}
+	// XHTTP is Xray-specific. Keep legacy records visible for deletion, but do
+	// not let an old enabled entry prevent the sing-box gateway from starting.
+	for _, inbound := range store.Inbounds {
+		if inbound.Network == "xhttp" {
+			inbound.Enable = false
+			if !strings.Contains(inbound.Remark, "XHTTP 不兼容") {
+				inbound.Remark += " [XHTTP 不兼容]"
+			}
+		}
+	}
 	n := &Native{
 		dir:   workDir,
 		store: store,
-		proc:  &xrayProc{bin: bin, dir: workDir},
+		proc:  &singBoxProc{bin: bin, dir: filepath.Join(workDir, "sing-box"), name: "gateway"},
 	}
-	// 上次进程被强杀时遗留的 Xray 还占着入站端口，先收掉
+	// Stop a child left behind by an unclean fanout shutdown.
 	n.proc.reapOrphan()
 	return n, nil
 }
 
 func (n *Native) Kind() string { return "native" }
 
-func (n *Native) Describe() string {
-	return fmt.Sprintf("fanout 自建 Xray（%s）", n.proc.bin)
-}
+func (n *Native) Describe() string { return "fanout 自建 sing-box (>=1.14)" }
 
-// apply 重新生成配置并重启 Xray，然后落盘。
+// apply 重新生成配置并重启 sing-box，然后落盘。
 // 调用方必须已持有 n.mu。
 func (n *Native) apply(tunnels []*Tunnel) error {
-	cfg := buildXrayConfig(n.store.sorted(), tunnels)
-	path, err := writeXrayConfig(n.dir, cfg)
+	cfg := buildSingBoxGatewayConfig(n.store.sorted(), tunnels)
+	path, err := writeSingBoxConfig(n.proc.dir, n.proc.name, cfg)
 	if err != nil {
 		return err
 	}
-	if err := verifyXrayConfig(n.proc.bin, path); err != nil {
+	if err := verifySingBoxConfig(n.proc.bin, path); err != nil {
 		return err
 	}
 	// 没有入站时不必留着进程占资源
@@ -63,7 +75,7 @@ func (n *Native) apply(tunnels []*Tunnel) error {
 		n.proc.stop()
 		return n.store.save(n.dir)
 	}
-	if err := n.proc.restart(path); err != nil {
+	if err := n.proc.start(path); err != nil {
 		return err
 	}
 	return n.store.save(n.dir)
@@ -77,7 +89,7 @@ func (n *Native) OnTunnelsChanged(tunnels []*Tunnel) error {
 	return n.apply(tunnels)
 }
 
-// Close 停掉自己拉起的 Xray。
+// Close 停掉自己拉起的 sing-box。
 func (n *Native) Close() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -355,7 +367,7 @@ func (n *Native) AddClient(id int, email string, tunnels []*Tunnel) error {
 }
 
 // DeleteClient 摘掉一个客户端。留下最后一个是有意的：
-// 没有任何客户端的入站在 Xray 里虽然合法，但谁也连不上，只会让人以为坏了。
+// 没有任何客户端的入站虽然合法，但谁也连不上，只会让人以为坏了。
 func (n *Native) DeleteClient(id int, email string, tunnels []*Tunnel) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -506,7 +518,7 @@ func (n *Native) CreateInbound(spec NewInboundSpec, tunnels []*Tunnel) (*Created
 	}, nil
 }
 
-// cloneRemark 给复制出来的入站起名，与 3x-ui 模式同一套规则。
+// cloneRemark gives copied inbounds a stable, readable name.
 func cloneRemark(base, label string) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
@@ -525,7 +537,7 @@ func shareLink(ib *nativeInbound, c nativeClient, host string) string {
 	q.Set("security", sec)
 
 	switch net {
-	case "ws", "httpupgrade", "xhttp":
+	case "ws", "httpupgrade":
 		q.Set("path", ib.Path)
 		if ib.Host != "" {
 			q.Set("host", ib.Host)
@@ -540,8 +552,7 @@ func shareLink(ib *nativeInbound, c nativeClient, host string) string {
 			if ib.TLS.ServerName != "" {
 				q.Set("sni", ib.TLS.ServerName)
 			}
-			// 自签证书验不过 CA。Xray 26.x 移除了 allowInsecure，
-			// 改用证书指纹让客户端固定信任这一张。
+			// 自签证书需要靠指纹让客户端固定信任这一张。
 			if ib.TLS.SelfSigned && ib.TLS.CertSha256 != "" {
 				q.Set("pinSHA256", ib.TLS.CertSha256)
 			}
@@ -551,8 +562,7 @@ func shareLink(ib *nativeInbound, c nativeClient, host string) string {
 			if len(ib.Reality.ServerNames) > 0 {
 				q.Set("sni", ib.Reality.ServerNames[0])
 			}
-			// pbk 是分享链接的通用写法，各家客户端都认；
-			// 注意 Xray 26.x 自己的配置文件里这个字段叫 password 而不是 publicKey
+			// pbk 是分享链接的通用写法，各家客户端都认。
 			q.Set("pbk", ib.Reality.PublicKey)
 			if len(ib.Reality.ShortIDs) > 0 {
 				q.Set("sid", ib.Reality.ShortIDs[0])
@@ -622,8 +632,8 @@ func buildTLS(dir string, spec NewInboundSpec) (*tlsConfig, error) {
 }
 
 // buildReality 组装 REALITY 配置，密钥和 shortId 都自动生成。
-// xrayBin 用来跑 `xray x25519` 生成密钥对。
-func buildReality(xrayBin string, spec NewInboundSpec) (*realityConfig, error) {
+// singBoxBin is used to generate a REALITY key pair.
+func buildReality(singBoxBin string, spec NewInboundSpec) (*realityConfig, error) {
 	dest := strings.TrimSpace(spec.Dest)
 	if dest == "" {
 		// REALITY 要跟 dest 完成一次真实 TLS1.3 握手，dest 不稳会让所有连接
@@ -645,7 +655,7 @@ func buildReality(xrayBin string, spec NewInboundSpec) (*realityConfig, error) {
 		names = []string{strings.SplitN(dest, ":", 2)[0]}
 	}
 
-	priv, pub, err := realityKeys(xrayBin)
+	priv, pub, err := realityKeys(singBoxBin)
 	if err != nil {
 		return nil, err
 	}

@@ -2,10 +2,15 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -37,24 +42,21 @@ func checkRealityDest(dest, serverName string) error {
 	return nil
 }
 
-// realityKeys 调用 xray 生成一对 X25519 密钥。
-//
-// 不同版本的输出措辞不一样：新版是 "Password (PublicKey):"，
-// 老版是 "Public key:"，所以两种都认。
+// realityKeys asks sing-box to generate the key pair in its native format.
 func realityKeys(bin string) (priv, pub string, err error) {
-	out, err := exec.Command(bin, "x25519").Output()
+	out, err := exec.Command(bin, "generate", "reality-keypair").Output()
 	if err != nil {
 		return "", "", fmt.Errorf("生成 REALITY 密钥失败: %w", err)
 	}
 	text := string(out)
 
 	rePriv := regexp.MustCompile(`(?i)private\s*key:\s*(\S+)`)
-	rePub := regexp.MustCompile(`(?i)(?:password\s*\(publickey\)|public\s*key):\s*(\S+)`)
+	rePub := regexp.MustCompile(`(?i)public\s*key:\s*(\S+)`)
 
 	mp := rePriv.FindStringSubmatch(text)
 	mb := rePub.FindStringSubmatch(text)
 	if mp == nil || mb == nil {
-		return "", "", fmt.Errorf("无法解析 xray x25519 输出: %s", strings.TrimSpace(text))
+		return "", "", fmt.Errorf("无法解析 sing-box REALITY 密钥输出: %s", strings.TrimSpace(text))
 	}
 	return mp[1], mb[1], nil
 }
@@ -69,10 +71,8 @@ func randomShortID() string {
 	return hex.EncodeToString(b)
 }
 
-// selfSignedCert 生成一张自签证书，用于没有真实域名时也能开 TLS。
-//
-// 走 openssl 而不是 Go 的 crypto/x509：证书要落成 Xray 能读的 PEM 文件，
-// openssl 一条命令就够，省掉一大段编解码代码。
+// selfSignedCert creates the certificate with Go's standard library so the
+// installed service does not need the openssl command.
 func selfSignedCert(dir, serverName string) (certFile, keyFile string, err error) {
 	certDir := filepath.Join(dir, "certs")
 	if err := os.MkdirAll(certDir, 0700); err != nil {
@@ -81,42 +81,71 @@ func selfSignedCert(dir, serverName string) (certFile, keyFile string, err error
 	base := filepath.Join(certDir, sanitizeTag(serverName))
 	certFile, keyFile = base+".crt", base+".key"
 
-	cmd := exec.Command("openssl", "req", "-x509", "-nodes",
-		"-newkey", "rsa:2048",
-		"-days", "3650",
-		"-keyout", keyFile,
-		"-out", certFile,
-		"-subj", "/CN="+serverName,
-		"-addext", "subjectAltName=DNS:"+serverName,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", "", fmt.Errorf("生成自签证书失败: %s", trimOutput(out))
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", fmt.Errorf("生成 TLS 私钥失败: %w", err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return "", "", fmt.Errorf("生成证书序列号失败: %w", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: serverName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().AddDate(10, 0, 0),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if ip := net.ParseIP(serverName); ip != nil {
+		tmpl.IPAddresses = []net.IP{ip}
+	} else {
+		tmpl.DNSNames = []string{serverName}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		return "", "", fmt.Errorf("生成自签证书失败: %w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		return "", "", err
 	}
 	return certFile, keyFile, nil
 }
 
 // certFingerprint 算出证书的 SHA-256 指纹（十六进制）。
 //
-// Xray 26.x 移除了 allowInsecure，自签证书要靠 pinnedPeerCertSha256
-// 让客户端固定信任这一张，所以生成分享链接时必须带上。
+// Self-signed links include this fingerprint so clients can pin the certificate.
 func certFingerprint(certFile string) (string, error) {
-	der, err := exec.Command("openssl", "x509", "-in", certFile, "-outform", "der").Output()
+	blob, err := os.ReadFile(certFile)
 	if err != nil {
 		return "", fmt.Errorf("读取证书失败: %w", err)
 	}
-	sum := sha256.Sum256(der)
+	block, _ := pem.Decode(blob)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("证书不是有效的 PEM")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", fmt.Errorf("解析证书失败: %w", err)
+	}
+	sum := sha256.Sum256(block.Bytes)
 	return hex.EncodeToString(sum[:]), nil
 }
 
 // 支持的取值。集中在这里，前后端校验共用一份。
 var (
-	nativeNetworks   = map[string]bool{"tcp": true, "ws": true, "grpc": true, "httpupgrade": true, "xhttp": true}
+	nativeNetworks   = map[string]bool{"tcp": true, "ws": true, "grpc": true, "httpupgrade": true}
 	nativeSecurities = map[string]bool{"none": true, "tls": true, "reality": true}
 )
 
 // visionCapable 判断能不能用 xtls-rprx-vision。
 //
-// Vision 只在 VLESS + 裸 TCP + TLS/REALITY 下有效，其他组合 Xray 会拒绝启动。
+// Vision is valid only for VLESS + TCP + TLS/REALITY.
 func visionCapable(protocol, network, security string) bool {
 	return protocol == "vless" && network == "tcp" && (security == "tls" || security == "reality")
 }

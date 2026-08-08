@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-func TestNativeInboundTagMatchesXUIFormat(t *testing.T) {
-	// tag 格式必须和 3x-ui 一致，否则两种后端的绑定语义会对不上
+func TestNativeInboundTagStable(t *testing.T) {
 	cases := []struct {
 		ib   nativeInbound
 		want string
@@ -22,7 +21,7 @@ func TestNativeInboundTagMatchesXUIFormat(t *testing.T) {
 	}
 }
 
-func TestBuildXrayConfigBindsOnlyLiveTunnels(t *testing.T) {
+func TestBuildSingBoxConfigBindsOnlyLiveTunnels(t *testing.T) {
 	up := &Tunnel{Port: 1080, Status: "up", Node: Node{HostName: "jp1"}}
 	down := &Tunnel{Port: 1081, Status: "failed", Node: Node{HostName: "jp2"}}
 	inbounds := []*nativeInbound{
@@ -31,7 +30,7 @@ func TestBuildXrayConfigBindsOnlyLiveTunnels(t *testing.T) {
 		{ID: 3, Port: 300, Protocol: "vless", Enable: true},
 	}
 
-	cfg := buildXrayConfig(inbounds, []*Tunnel{up, down})
+	cfg := buildSingBoxGatewayConfig(inbounds, []*Tunnel{up, down})
 
 	outs := map[string]bool{}
 	for _, o := range cfg["outbounds"].([]any) {
@@ -44,26 +43,27 @@ func TestBuildXrayConfigBindsOnlyLiveTunnels(t *testing.T) {
 		t.Error("未连通的隧道不该生成出站")
 	}
 
-	rules := cfg["routing"].(map[string]any)["rules"].([]any)
+	rules := cfg["route"].(map[string]any)["rules"].([]any)
 	if len(rules) != 1 {
 		t.Fatalf("只有绑到连通隧道的入站才该有规则，实际 %d 条", len(rules))
 	}
-	if got := rules[0].(map[string]any)["outboundTag"]; got != "fanout-jp1" {
-		t.Errorf("outboundTag = %v, want fanout-jp1", got)
+	if got := rules[0].(map[string]any)["outbound"]; got != "fanout-jp1" {
+		t.Errorf("outbound = %v, want fanout-jp1", got)
 	}
 }
 
-func TestBuildXrayConfigForcesIPv4OnDirect(t *testing.T) {
-	// 隧道内没有 IPv6，direct 走 IPv6 会暴露母机真实地址
-	cfg := buildXrayConfig(nil, nil)
+func TestBuildSingBoxConfigHasDirectFallback(t *testing.T) {
+	cfg := buildSingBoxGatewayConfig(nil, nil)
 	for _, o := range cfg["outbounds"].([]any) {
 		m := o.(map[string]any)
 		if m["tag"] != "direct" {
 			continue
 		}
-		s := m["settings"].(map[string]any)
-		if s["domainStrategy"] != "UseIPv4" {
-			t.Errorf("direct 出站应强制 IPv4，实际 %v", s["domainStrategy"])
+		if m["type"] != "direct" {
+			t.Errorf("direct 出站类型错误: %v", m["type"])
+		}
+		if cfg["route"].(map[string]any)["final"] != "direct" {
+			t.Error("未绑定入站应走 direct")
 		}
 		return
 	}
@@ -100,7 +100,7 @@ func TestCloneRemark(t *testing.T) {
 }
 
 func TestVisionCapable(t *testing.T) {
-	// Vision 只在 VLESS + 裸 TCP + TLS/REALITY 下有效，其他组合 Xray 会拒绝启动
+	// Vision is valid only for VLESS + TCP + TLS/REALITY.
 	if !visionCapable("vless", "tcp", "reality") {
 		t.Error("vless/tcp/reality 应当支持 vision")
 	}
@@ -118,33 +118,30 @@ func TestVisionCapable(t *testing.T) {
 	}
 }
 
-func TestStreamSettingsPerNetwork(t *testing.T) {
+func TestSingBoxTransportPerNetwork(t *testing.T) {
 	cases := []struct {
 		ib      nativeInbound
-		key     string
 		wantKey string
 		want    any
 	}{
-		{nativeInbound{Network: "ws", Path: "/p"}, "wsSettings", "path", "/p"},
-		{nativeInbound{Network: "httpupgrade", Path: "/h"}, "httpupgradeSettings", "path", "/h"},
-		{nativeInbound{Network: "xhttp", Path: "/x"}, "xhttpSettings", "path", "/x"},
+		{nativeInbound{Network: "ws", Path: "/p"}, "path", "/p"},
+		{nativeInbound{Network: "httpupgrade", Path: "/h"}, "path", "/h"},
 		// gRPC 没有 path，Path 字段复用为 serviceName，且不带前导斜杠
-		{nativeInbound{Network: "grpc", Path: "/svc"}, "grpcSettings", "serviceName", "svc"},
+		{nativeInbound{Network: "grpc", Path: "/svc"}, "service_name", "svc"},
 	}
 	for _, c := range cases {
-		st := streamSettingsJSON(&c.ib)
-		sub, ok := st[c.key].(map[string]any)
-		if !ok {
-			t.Errorf("%s 缺少 %s", c.ib.Network, c.key)
+		transport := singBoxTransportJSON(&c.ib)
+		if transport == nil {
+			t.Errorf("%s 缺少 transport", c.ib.Network)
 			continue
 		}
-		if got := sub[c.wantKey]; got != c.want {
+		if got := transport[c.wantKey]; got != c.want {
 			t.Errorf("%s 的 %s = %v, want %v", c.ib.Network, c.wantKey, got, c.want)
 		}
 	}
 }
 
-func TestStreamSettingsReality(t *testing.T) {
+func TestSingBoxInboundReality(t *testing.T) {
 	ib := nativeInbound{
 		Network: "tcp", Security: "reality",
 		Reality: &realityConfig{
@@ -152,19 +149,15 @@ func TestStreamSettingsReality(t *testing.T) {
 			PrivateKey: "priv", PublicKey: "pub", ShortIDs: []string{"abcd1234"},
 		},
 	}
-	st := streamSettingsJSON(&ib)
-	if st["security"] != "reality" {
-		t.Fatalf("security = %v", st["security"])
-	}
-	r, ok := st["realitySettings"].(map[string]any)
+	tlsOptions := singBoxInboundTLSJSON(&ib)
+	r, ok := tlsOptions["reality"].(map[string]any)
 	if !ok {
-		t.Fatal("缺少 realitySettings")
+		t.Fatal("缺少 reality")
 	}
-	if r["privateKey"] != "priv" {
-		t.Errorf("服务端要写私钥，实际 %v", r["privateKey"])
+	if r["private_key"] != "priv" {
+		t.Errorf("服务端要写私钥，实际 %v", r["private_key"])
 	}
-	// 公钥只有客户端用，写进服务端配置会被 Xray 拒绝
-	if _, leaked := r["publicKey"]; leaked {
+	if _, leaked := r["public_key"]; leaked {
 		t.Error("服务端配置不该出现 publicKey")
 	}
 }

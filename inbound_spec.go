@@ -6,7 +6,7 @@ import (
 )
 
 // normalizedSpec 是 NewInboundSpec 过完校验、补完默认值之后的样子。
-// 两种后端都从这里出发：自建模式落成 nativeInbound，3x-ui 模式转成面板的 add 载荷。
+// The normalized form is persisted as a nativeInbound and rendered as sing-box JSON.
 type normalizedSpec struct {
 	Protocol string
 	Network  string
@@ -21,8 +21,7 @@ type normalizedSpec struct {
 // normalizeInboundSpec 校验协议组合并补上默认值。
 //
 // used 是已被占用的端口集合；端口留空时从中避开随机挑一个。
-// 这段逻辑对两种后端完全一致，所以从 Native.CreateInbound 里抽出来共用，
-// 免得 3x-ui 那边再写一份走样的校验。
+// Keeping validation separate from persistence also makes protocol combinations testable.
 func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSpec, error) {
 	proto := strings.ToLower(strings.TrimSpace(spec.Protocol))
 	if proto == "" {
@@ -45,9 +44,8 @@ func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSp
 	if !nativeSecurities[security] {
 		return nil, fmt.Errorf("不支持的安全层 %q", spec.Security)
 	}
-	// REALITY 靠模仿 TLS 握手工作，套在 ws/grpc 这类已有自己头部的传输上没有意义，
-	// Xray 也不接受这种组合
-	if security == "reality" && network != "tcp" && network != "xhttp" && network != "grpc" {
+	// REALITY cannot wrap WebSocket or HTTPUpgrade.
+	if security == "reality" && network != "tcp" && network != "grpc" {
 		return nil, fmt.Errorf("REALITY 不支持 %s 传输", network)
 	}
 	// VMess 自带加密，但 TLS 在这里是为了流量伪装而不是加密强度，
@@ -67,7 +65,7 @@ func normalizeInboundSpec(spec NewInboundSpec, used map[int]bool) (*normalizedSp
 	path := strings.TrimSpace(spec.Path)
 	if path == "" {
 		switch network {
-		case "ws", "httpupgrade", "xhttp":
+		case "ws", "httpupgrade":
 			path = "/" + randomHex(6)
 		case "grpc":
 			path = randomHex(6)

@@ -5,8 +5,7 @@
 把 VPN Gate 的公共节点变成本地 SOCKS5 端口：一个端口一个出口 IP。
 再给每个出口挂一个节点链接，客户端连哪个端口就从哪个国家出去。
 
-节点链接有两种管法：同机装了 3x-ui 就接管面板里的入站，没装则 fanout
-自己跑 Xray，建站、改站、发链接都在同一个界面里完成。
+fanout 统一由 sing-box 管理节点入站和 VPN Gate 出口，建站、改站、发链接都在同一个界面里完成。
 
 ![主界面](https://images.joeyblog.net/2026/7/27/fanout-dashboard.png)
 
@@ -16,30 +15,32 @@
 
 ## 原理
 
-每个节点跑在独立的 network namespace 里，netns 内启动官方 openvpn 客户端。
-SOCKS5 监听在母机，出站连接用 `setns` 切进对应 netns 建立。
-
-这样做的好处：VPN 的路由劫持只影响自己的 netns，不会切断母机的网络；
-多个节点互不干扰，各自一个出口 IP。
+每个出口启动一个独立的 sing-box 进程。进程内使用 `system: false` 的 OpenVPN
+endpoint 和 gVisor 用户态网络栈，不创建系统 TUN 接口，也不改宿主路由或防火墙。
+公网 SOCKS5 仍由 fanout 监听和鉴权，内部流量再交给该出口的 loopback SOCKS5。
+因此换节点或掉线重连只影响这一条出口。
 
 ```
-客户端 ──> 母机 SOCKS5 :随机端口 ──> netns foN ──> openvpn ──> VPN Gate 节点
+客户端 ──> fanout SOCKS5 :随机端口 ──> sing-box SOCKS5 (loopback) ──> OpenVPN endpoint ──> VPN Gate 节点
 ```
 
 ## 安装
 
-需要 root，Linux（依赖 netns）。
+安装服务需要 root，运行时不依赖 netns、iptables 或 `/dev/net/tun`。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.sh)
 ```
 
 会自动下载对应架构的预编译二进制。也可以 clone 仓库后在源码目录运行同一个脚本，
-那样会从源码编译（需要 Go 1.21+）。
+那样会从源码编译（需要 Go 1.24+）。
 
-依赖（openvpn / curl / openssl / iproute / iptables）会按发行版自动装，
-apt、dnf、yum、pacman、apk、zypper 都认。没装 3x-ui 时还会顺带下载一份
-Xray 到 `/var/lib/fanout/bin/`，装了则跳过，入站交给面板管。
+安装脚本只会补齐 `curl` 和 `tar`，再下载 fanout 与最新版 sing-box 到
+`/var/lib/fanout/bin/`。运行时要求 sing-box `>=1.14.0`（支持后续版本），且必须带
+`with_openvpn,with_gvisor` 两个构建标签。也可以通过 `SINGBOX_VERSION=...` 指定版本。
+
+OpenVPN endpoint 在 sing-box 1.14 中仍是预发布能力。生产使用前应先在目标地区
+实测 VPN Gate 节点兼容性；如果需要可重复部署，建议通过 `SINGBOX_VERSION=...` 固定版本。
 
 服务用 systemd 或 OpenRC 都能装，装完自动开机自启。
 
@@ -49,10 +50,6 @@ Xray 到 `/var/lib/fanout/bin/`，装了则跳过，入站交给面板管。
 apk add bash
 bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.sh)
 ```
-
-另外 fanout 要在 netns 里跑 openvpn，**宿主必须放开 `/dev/net/tun`**。
-不少 LXC 小鸡没给这个权限，`ls /dev/net/tun` 不存在且 `mknod` 报
-Operation not permitted 的话，这台机器用不了，跟发行版无关。
 
 装完敲 `f` 打开管理菜单：
 
@@ -94,18 +91,15 @@ Operation not permitted 的话，这台机器用不了，跟发行版无关。
 
 ### 节点链接从哪来
 
-同机装了 3x-ui 就直接接管面板里的入站，面板端口、路径、API token 全自动探测，
-开了 SSL 也能识别。没装 3x-ui 时 fanout 自己跑一个 Xray，界面上多一个「新建节点」
-按钮，可以选协议（VLESS / VMess / Trojan）、传输（TCP / WebSocket / gRPC /
-HTTPUpgrade / XHTTP）和安全层（无 / TLS / REALITY）。
+fanout 自己运行 sing-box，界面提供「新建节点」按钮，可以选协议
+（VLESS / VMess / Trojan）、传输（TCP / WebSocket / gRPC / HTTPUpgrade）和安全层
+（无 / TLS / REALITY）。XHTTP 是 Xray 专有传输，不再支持；旧的 XHTTP 入站升级后会
+被禁用，需用其他传输重新创建。
 
 ![新建节点](https://images.joeyblog.net/2026/7/27/fanout-newnode.png)
 
 REALITY 的密钥对和 shortId 自动生成；TLS 不填证书就生成自签的，分享链接会带上
 证书指纹让客户端固定信任。也可以填自己的证书路径。
-
-两种模式下改端口、启停、加删客户端、绑定出口的操作完全一致，用起来没有区别。
-想固定用哪种，加 `-panel 3x-ui` 或 `-panel native` 启动参数。
 
 ## 运维
 
@@ -140,13 +134,12 @@ f uninstall  # 卸载
 
 隧道状态存在 `/var/lib/fanout/state.json`，重启后自动恢复，端口保持不变。
 
-健康检查每 10 秒跑一次，比对出口 IP 是否还是建立隧道时那个——openvpn 挂掉后
-netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符就自动换节点重连，
-槽位和端口不变，原先指向它的节点链接会自动改绑过去。
+健康检查每 10 秒经当前出口查询一次 IP，比对是否仍为建立时的出口。连续两次失败或
+不符就自动换节点重连，槽位和端口不变，原先指向它的节点链接会自动改绑过去。
 
 ## 已知限制
 
-- 只转发 TCP。SOCKS5 收到域名时在本机解析，隧道内不跑 UDP/DNS。
+- 只转发 TCP。
 - VPN Gate 是志愿者节点，有相当比例已下线或满员（`AUTH_FAILED`）。
   启动时连不上会自动顺着同地区候选往下试，最多 6 个。
 - 管理界面只有随机路径 + 口令登录，没有 HTTPS。放公网建议前面套一层反代。
@@ -155,8 +148,11 @@ netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符
 
 [MIT](LICENSE)。
 
+sing-box 是单独下载和运行的 GPLv3 程序，许可见其上游项目。
+
 节点来自 [VPN Gate](https://www.vpngate.net/)（筑波大学的学术实验项目），
-本工具只是调用其公开的节点列表并用官方 openvpn 客户端连接，不修改也不代理其服务。
+本工具只是调用其公开的节点列表，并用 sing-box 的 OpenVPN client endpoint 连接，
+不修改也不代理其服务。
 使用时请遵守 VPN Gate 的条款和你所在地的法律。
 
 ## 交流

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fanout 安装脚本：装二进制、装服务（systemd 或 OpenRC）、开机自启。
+# fanout 安装脚本：装 fanout + sing-box、装服务（systemd 或 OpenRC）、开机自启。
 #
 # Alpine 默认不带 bash，先装再跑：
 #   apk add bash && bash <(curl -fsSL .../install.sh)
@@ -11,7 +11,7 @@ WORK_DIR="${WORK_DIR:-/var/lib/fanout}"
 BIN=/usr/local/bin/fanout
 
 if [[ $EUID -ne 0 ]]; then
-  echo "需要 root 权限（要创建 netns 和改 iptables）" >&2
+  echo "需要 root 权限（要安装服务和程序）" >&2
   exit 1
 fi
 
@@ -74,19 +74,14 @@ svc_logs_hint() {
   [[ "$INIT_SYS" == systemd ]] && echo "journalctl -u fanout -n 30" || echo "cat /var/log/fanout.log"
 }
 
-echo "[1/6] 检查依赖"
+echo "[1/5] 检查依赖"
 
 # 同一个命令在各发行版里的包名并不一致，按包管理器分别给出。
 pkg_for() {
   local cmd="$1" mgr="$2"
   case "$cmd" in
-    openvpn)  echo openvpn ;;
     curl)     echo curl ;;
-    openssl)  echo openssl ;;
     tar)      echo tar ;;
-    ip)       case "$mgr" in apk) echo iproute2 ;; pacman) echo iproute2 ;; *) echo iproute ;; esac ;;
-    iptables) echo iptables ;;
-    unzip)    echo unzip ;;
   esac
 }
 
@@ -113,14 +108,10 @@ install_pkgs() {
 }
 
 MGR=$(detect_mgr)
-# Debian/Ubuntu 的 iproute2 与 RHEL 系的 iproute 是同一个东西，名字不同
-[[ "$MGR" == "apt-get" ]] && iproute_pkg=iproute2 || iproute_pkg=iproute
-
 need_cmd=()
-for c in openvpn curl openssl tar iptables; do
+for c in curl tar; do
   command -v "$c" >/dev/null || need_cmd+=("$c")
 done
-command -v ip >/dev/null || need_cmd+=(ip)
 
 if [[ ${#need_cmd[@]} -gt 0 ]]; then
   echo "      缺少: ${need_cmd[*]}"
@@ -129,9 +120,7 @@ if [[ ${#need_cmd[@]} -gt 0 ]]; then
     exit 1
   fi
   pkgs=()
-  for c in "${need_cmd[@]}"; do
-    if [[ "$c" == "ip" ]]; then pkgs+=("$iproute_pkg"); else pkgs+=("$(pkg_for "$c" "$MGR")"); fi
-  done
+  for c in "${need_cmd[@]}"; do pkgs+=("$(pkg_for "$c" "$MGR")"); done
   echo "      安装: ${pkgs[*]}"
   install_pkgs "$MGR" "${pkgs[@]}" || {
     echo "      自动安装失败，请手动安装: ${pkgs[*]}" >&2
@@ -139,7 +128,7 @@ if [[ ${#need_cmd[@]} -gt 0 ]]; then
   }
 fi
 
-echo "[2/6] 获取程序"
+echo "[2/5] 获取程序"
 REPO="${REPO:-byJoey/fanout}"
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -167,58 +156,62 @@ else
   rm -rf "$TMP"
 fi
 
-echo "[3/6] 准备 Xray"
-# 没装 3x-ui 时 fanout 自己跑 Xray，需要一份二进制。
-# 装到 WORK_DIR/bin 下而不是 /usr/local/bin，避免和机器上别人的 xray 抢版本。
+SINGBOX_VERSION="${SINGBOX_VERSION:-latest}"
+if [[ "$SINGBOX_VERSION" == "latest" ]]; then
+  SINGBOX_TAG_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+    https://github.com/SagerNet/sing-box/releases/latest || true)
+  SINGBOX_VERSION=${SINGBOX_TAG_URL##*/}
+  SINGBOX_VERSION=${SINGBOX_VERSION#v}
+fi
+[[ "$SINGBOX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || {
+  echo "      无法确定 sing-box 版本，请设置 SINGBOX_VERSION，例如 1.14.0-alpha.50" >&2
+  exit 1
+}
+echo "[3/5] 准备 sing-box ${SINGBOX_VERSION}（运行时要求 >= 1.14）"
 mkdir -p "${WORK_DIR}/bin"
-if command -v /usr/local/x-ui/x-ui >/dev/null 2>&1 || [[ -x /usr/bin/x-ui ]]; then
-  echo "      检测到 3x-ui，入站交给面板管，跳过"
-elif [[ -x "${WORK_DIR}/bin/xray" ]]; then
-  echo "      已有 $("${WORK_DIR}/bin/xray" version 2>/dev/null | head -1)"
+CURRENT_SINGBOX=""
+if [[ -x "${WORK_DIR}/bin/sing-box" ]]; then
+  CURRENT_SINGBOX=$("${WORK_DIR}/bin/sing-box" version 2>/dev/null | head -1 || true)
+fi
+CURRENT_VERSION=$(sed -n 's/^sing-box version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' <<<"$CURRENT_SINGBOX")
+if [[ "$CURRENT_VERSION" =~ ^1\.(1[4-9]|[2-9][0-9])$ || "$CURRENT_VERSION" =~ ^[2-9][0-9]*\. ]] && \
+   [[ "$CURRENT_SINGBOX" == *with_openvpn* && "$CURRENT_SINGBOX" == *with_gvisor* ]]; then
+  echo "      已有 ${CURRENT_SINGBOX}"
 else
-  case "$GOARCH" in
-    amd64) XRAY_ASSET=Xray-linux-64.zip ;;
-    arm64) XRAY_ASSET=Xray-linux-arm64-v8a.zip ;;
-  esac
-  echo "      下载 Xray (${XRAY_ASSET})"
-  XT=$(mktemp -d)
-  XURL="https://github.com/XTLS/Xray-core/releases/latest/download/${XRAY_ASSET}"
-  if curl -fsSL "$XURL" -o "$XT/x.zip"; then
-    # 只为解一个 zip 装 unzip 有点重，busybox 环境常自带
-    if command -v unzip >/dev/null; then
-      unzip -qo "$XT/x.zip" -d "$XT"
-    elif command -v busybox >/dev/null && busybox unzip -h >/dev/null 2>&1; then
-      busybox unzip -qo "$XT/x.zip" -d "$XT"
-    else
-      [[ -n "$MGR" ]] && install_pkgs "$MGR" unzip >/dev/null 2>&1 || true
-      command -v unzip >/dev/null && unzip -qo "$XT/x.zip" -d "$XT"
-    fi
-    if [[ -f "$XT/xray" ]]; then
-      install -m 755 "$XT/xray" "${WORK_DIR}/bin/xray"
-      echo "      $("${WORK_DIR}/bin/xray" version 2>/dev/null | head -1)"
-    else
-      echo "      解压失败，自建模式不可用（装了 3x-ui 则不受影响）" >&2
-    fi
-  else
-    echo "      下载失败，自建模式不可用（装了 3x-ui 则不受影响）" >&2
+  echo "      下载 sing-box"
+  ST=$(mktemp -d)
+  SINGBOX_ASSET="sing-box-${SINGBOX_VERSION}-linux-${GOARCH}.tar.gz"
+  SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${SINGBOX_ASSET}"
+  if ! curl -fsSL "$SINGBOX_URL" -o "$ST/sing-box.tar.gz"; then
+    echo "      下载失败: $SINGBOX_URL" >&2
+    exit 1
   fi
-  rm -rf "$XT"
+  case "$GOARCH" in
+    amd64) SINGBOX_SHA256=b2af50118c457e13e9e6deeb1ee07e609d8862deb2568ea267b941e594234ca8 ;;
+    arm64) SINGBOX_SHA256=18216accfbe05482fff35af4b5fa5f2b8c6a655c9675f6482e3846da34ca18db ;;
+  esac
+  if [[ -n "${SINGBOX_SHA256:-}" ]] && command -v sha256sum >/dev/null 2>&1; then
+    SINGBOX_ACTUAL=$(sha256sum "$ST/sing-box.tar.gz")
+    SINGBOX_ACTUAL=${SINGBOX_ACTUAL%% *}
+    [[ "$SINGBOX_ACTUAL" == "$SINGBOX_SHA256" ]] || {
+      echo "      sing-box 压缩包校验失败" >&2
+      exit 1
+    }
+  fi
+  tar xzf "$ST/sing-box.tar.gz" -C "$ST"
+  SB_BIN=$(find "$ST" -type f -name sing-box -perm -u+x | head -1)
+  [[ -n "$SB_BIN" ]] || { echo "      sing-box 解压失败" >&2; exit 1; }
+  install -m 755 "$SB_BIN" "${WORK_DIR}/bin/sing-box"
+  echo "      $("${WORK_DIR}/bin/sing-box" version 2>/dev/null | head -1)"
+  rm -rf "$ST"
 fi
+SINGBOX_INFO=$("${WORK_DIR}/bin/sing-box" version 2>/dev/null)
+[[ "$SINGBOX_INFO" == *with_openvpn* && "$SINGBOX_INFO" == *with_gvisor* ]] || {
+  echo "      sing-box 缺少 with_openvpn 或 with_gvisor 构建标签" >&2
+  exit 1
+}
 
-echo "[4/6] 放行转发"
-sysctl -qw net.ipv4.ip_forward=1
-grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null \
-  || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-# FORWARD 链常有兜底 REJECT，fanout 用的网段要插到最前面
-if ! iptables -C FORWARD -s 10.99.0.0/16 -j ACCEPT 2>/dev/null; then
-  iptables -I FORWARD 1 -s 10.99.0.0/16 -j ACCEPT
-fi
-if ! iptables -C FORWARD -d 10.99.0.0/16 -j ACCEPT 2>/dev/null; then
-  iptables -I FORWARD 1 -d 10.99.0.0/16 -j ACCEPT
-fi
-command -v netfilter-persistent >/dev/null && netfilter-persistent save >/dev/null 2>&1 || true
-
-echo "[5/6] 安装服务"
+echo "[4/5] 安装服务"
 # 管理菜单
 if [[ -f f.sh ]]; then
   install -m 755 f.sh /usr/local/bin/f
@@ -233,7 +226,7 @@ chmod 700 "$WORK_DIR"
 svc_install
 svc_enable_start
 
-echo "[6/6] 就绪"
+echo "[5/5] 就绪"
 sleep 3
 svc_is_active && echo "      服务运行中（${INIT_SYS}）" || {
   echo "      服务启动失败，看 $(svc_logs_hint)" >&2

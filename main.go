@@ -23,7 +23,6 @@ func main() {
 		maxSlots = flag.Int("max", 20, "最多同时运行的隧道数")
 		workDir  = flag.String("dir", "/var/lib/fanout", "工作目录")
 	)
-	panelMode := flag.String("panel", "", "节点链接后端: 留空自动探测, 3x-ui, native")
 	publicIP := flag.String("ip", "", "母机公网 IPv4，用于分享链接/SOCKS5 地址；留空则自动探测")
 	showVersion := flag.Bool("version", false, "显示版本后退出")
 	flag.Parse()
@@ -37,19 +36,20 @@ func main() {
 		return
 	}
 
-	if os.Geteuid() != 0 {
-		log.Fatal("需要 root 权限（要创建 netns 和改 iptables）")
-	}
 	if err := os.MkdirAll(*workDir, 0700); err != nil {
 		log.Fatalf("创建工作目录失败: %v", err)
 	}
 	setPublicIPOverride(*publicIP)
 	go hostPublicIP() // 预热探测，别让首个请求阻塞
-	if err := prepareHost(); err != nil {
+	singBoxBin, err := findSingBox(*workDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := validateSingBox(singBoxBin); err != nil {
 		log.Fatal(err)
 	}
 
-	configurePanel(*workDir, *panelMode)
+	configurePanel(*workDir)
 	if p, err := openPanel(); err != nil {
 		log.Printf("节点链接后端暂不可用（可在 Web 界面查看原因）: %v", err)
 	} else {
@@ -57,6 +57,7 @@ func main() {
 	}
 
 	mgr := NewManager(*maxSlots, *workDir)
+	mgr.singBoxBin = singBoxBin
 	log.Printf("正在拉取节点列表...")
 	if n, err := mgr.RefreshNodes(); err != nil {
 		log.Printf("拉取失败（可在 Web 界面重试）: %v", err)
@@ -68,10 +69,10 @@ func main() {
 		log.Printf("恢复上次状态失败: %v", err)
 	} else if n > 0 {
 		log.Printf("正在恢复上次的 %d 条隧道", n)
-		// 3x-ui 模式重启不会自动重写面板出站，旧版本升上来时面板里的 socks
-		// 出站没有认证字段，端口一旦要认证就连不上，这里恢复后对账一次
-		go mgr.ReconcileOutbounds()
 	}
+	// Start persisted direct inbounds even when there are no VPN exits. Restored
+	// tunnels will trigger another refresh as each endpoint becomes ready.
+	mgr.notifyPanel()
 
 	go mgr.WatchHealth()
 
@@ -409,7 +410,7 @@ func apiJobDismiss(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiXUIStatus 报告当前的节点链接后端：接管的 3x-ui，或 fanout 自己跑的 Xray。
+// apiXUIStatus reports the local sing-box inbound manager.
 func apiXUIStatus(w http.ResponseWriter, r *http.Request) {
 	p, err := openPanel()
 	if err != nil {
@@ -420,22 +421,15 @@ func apiXUIStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"available": true,
-		"kind":      p.Kind(),
-		"describe":  p.Describe(),
-		// 两种后端都能建入站：自建模式写自己的库，3x-ui 走面板的 inbounds/add API
+		"available":  true,
+		"kind":       p.Kind(),
+		"describe":   p.Describe(),
 		"can_create": true,
-	}
-	if x, ok := p.(*XUI); ok {
-		resp["port"] = x.Port
-		resp["base_path"] = x.BasePath
-		resp["scheme"] = x.Scheme
-		resp["host"] = x.Host
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// apiXUIInbounds 列出面板里已有的入站及其绑定状态。
+// apiXUIInbounds lists managed inbounds and their bindings.
 func apiXUIInbounds(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		list, err := cachedInbounds(liveHosts(m))
@@ -458,7 +452,7 @@ func liveHosts(m *Manager) map[string]bool {
 	return live
 }
 
-// apiXUIBind 把某个入站绑定到某条隧道，slot=0 表示解绑。
+// apiXUIBind binds an inbound to one tunnel; an empty host unbinds it.
 func apiXUIBind(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tag := r.URL.Query().Get("tag")
@@ -481,7 +475,7 @@ func apiXUIBind(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiXUIClone 以某个入站为模板，为所有已连通的隧道各复制一个入站并绑好出口。
+// apiXUIClone copies an inbound to selected live tunnels.
 func apiXUIClone(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(r.URL.Query().Get("id"))
@@ -526,7 +520,7 @@ func apiXUIClone(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiXUIDetail 返回某个入站的详情，含客户端与可直接复制的分享链接。
+// apiXUIDetail returns an inbound, its clients, and share links.
 func apiXUIDetail(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.URL.Query().Get("id"))
 	if err != nil {
@@ -636,9 +630,7 @@ func apiXUIDelete(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiInboundCreate 新建一个入站。两种后端都支持：自建模式写自己的库，
-// 接管 3x-ui 时走面板的 inbounds/add API。
-// apiInboundUpdate 改入站的端口、备注与启停。两种后端都支持。
+// apiInboundUpdate changes an inbound's port, remark, or enabled state.
 func apiInboundUpdate(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := openPanel()

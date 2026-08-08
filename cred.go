@@ -60,25 +60,6 @@ func validateCred(c SocksCred) error {
 	return nil
 }
 
-// socksServerJSON 生成 Xray socks 出站里的 server 条目。
-//
-// 两种后端共用：本机 Xray 连的是 fanout 自己的 SOCKS5 端口，
-// 端口既然要认证，出站配置就必须带上同一套凭据。
-func socksServerJSON(t *Tunnel) map[string]any {
-	cred := t.credential()
-	server := map[string]any{
-		"address": "127.0.0.1",
-		"port":    t.Port,
-	}
-	if cred.User != "" {
-		server["users"] = []any{map[string]any{
-			"user": cred.User,
-			"pass": cred.Pass,
-		}}
-	}
-	return server
-}
-
 // socksURL 拼出客户端能直接粘贴的 socks5:// 地址。
 func socksURL(host string, port int, cred SocksCred) string {
 	if cred.User == "" {
