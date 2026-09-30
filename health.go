@@ -73,6 +73,16 @@ func (m *Manager) reconnect(t *Tunnel, oldHost string) {
 	t.Err = "正在换节点重连"
 	t.ExitIP = ""
 
+	// 动手之前先把"原来绑的是谁"落盘。
+	//
+	// 换节点是两步：连上新节点、再把入站改绑过来。两步之间崩溃或重启的话，
+	// 存盘的隧道已经是新节点、入站却还指着旧节点，那个入站就成了孤儿。
+	// 这条线索留在盘上，重启恢复时能照着把它接回来。
+	t.setPrevHost(oldHost)
+	if err := m.saveState(); err != nil {
+		log.Printf("保存状态失败: %v", err)
+	}
+
 	if t.ovpn != nil && t.ovpn.Process != nil {
 		_ = t.ovpn.Process.Kill()
 		t.ovpn = nil
@@ -91,13 +101,18 @@ func (m *Manager) reconnect(t *Tunnel, oldHost string) {
 		if t.Node.HostName != oldHost {
 			if err := m.rebind(oldHost, t); err != nil {
 				log.Printf("重连后同步 3x-ui 绑定失败: %v", err)
+				return
 			}
+		} else if err := m.resync(t); err != nil {
+			// 节点名没变也要重写一次出站：出口 IP 可能变了，
+			// 而且上一轮换节点时留下的绑定需要重新指回来。
+			log.Printf("重连后重写 3x-ui 出站失败: %v", err)
 			return
 		}
-		// 节点名没变也要重写一次出站：出口 IP 可能变了，
-		// 而且上一轮换节点时留下的绑定需要重新指回来。
-		if err := m.resync(t); err != nil {
-			log.Printf("重连后重写 3x-ui 出站失败: %v", err)
+		// 入站已经跟过来了，标记可以清了
+		t.setPrevHost("")
+		if err := m.saveState(); err != nil {
+			log.Printf("保存状态失败: %v", err)
 		}
 	}()
 }

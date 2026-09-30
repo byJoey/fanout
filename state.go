@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -19,6 +20,9 @@ type persistedTunnel struct {
 	// SOCKS5 凭据要存盘：用户已经把它分发给客户端了，重启后变掉等于全断
 	SocksUser string `json:"socks_user,omitempty"`
 	SocksPass string `json:"socks_pass,omitempty"`
+	// PrevHost 非空表示上次换节点只做了一半：隧道已经指向新节点，
+	// 但入站还绑在这个旧节点上。恢复时照着它把入站接回来。
+	PrevHost string `json:"prev_host,omitempty"`
 }
 
 type persistedState struct {
@@ -45,6 +49,7 @@ func (m *Manager) saveState() error {
 			Config:      t.Node.Config,
 			SocksUser:   t.Cred.User,
 			SocksPass:   t.Cred.Pass,
+			PrevHost:    t.prevHostOf(),
 		})
 	}
 
@@ -108,10 +113,32 @@ func (m *Manager) restoreState() (int, error) {
 			Status: "starting",
 			Cred:   cred,
 		}
+		t.setPrevHost(p.PrevHost)
 		m.mu.Lock()
 		m.tunnels[p.Slot] = t
 		m.mu.Unlock()
-		go m.bringUpPersist(t, true, true)
+		go m.restoreTunnel(t)
 	}
 	return len(st.Tunnels), nil
+}
+
+// restoreTunnel 拉起一条恢复出来的隧道，顺手把上次没做完的换节点收尾。
+func (m *Manager) restoreTunnel(t *Tunnel) {
+	prev := t.prevHostOf()
+	m.bringUpPersist(t, true, true)
+	if prev == "" || t.Status != "up" {
+		return
+	}
+	// 上次换节点改完隧道就中断了，入站还指着旧节点。不接回来的话它会一直
+	// 显示成"未绑定出口"，流量悄悄走直连——用户看不出哪里不对。
+	if err := m.rebind(prev, t); err != nil {
+		log.Printf("恢复时把入站接回出口 %d 失败: %v", t.Slot, err)
+		return
+	}
+	log.Printf("出口 %d 上次换节点没收尾，已把原来绑着 %s 的入站接到 %s",
+		t.Slot, prev, t.Node.HostName)
+	t.setPrevHost("")
+	if err := m.saveState(); err != nil {
+		log.Printf("保存状态失败: %v", err)
+	}
 }

@@ -43,6 +43,23 @@ func main() {
 	if err := os.MkdirAll(*workDir, 0700); err != nil {
 		log.Fatalf("创建工作目录失败: %v", err)
 	}
+
+	// 同一个工作目录只许跑一个实例：两份会共用 state.json 互相覆盖，隧道记录直接丢
+	unlock, err := lockWorkDir(*workDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer unlock()
+
+	// 定下这台机器上属于本实例的 netns 名与网段。默认目录沿用老名字，
+	// 换了目录就自动隔离，免得两个实例互相拆隧道（见 instance.go）
+	if err := initInstance(*workDir); err != nil {
+		log.Fatalf("初始化实例标识失败: %v", err)
+	}
+	if instTag != "" {
+		log.Printf("非默认工作目录，本实例用 netns fo%s* 与网段 10.%d.x", instTag, instBase)
+	}
+
 	setPublicIPOverride(*publicIP)
 	go hostPublicIP() // 预热探测，别让首个请求阻塞
 	if err := prepareHost(); err != nil {
@@ -82,6 +99,7 @@ func main() {
 		log.Println("正在清理所有隧道...")
 		mgr.Shutdown()
 		closePanel()
+		unlock() // os.Exit 会绕过 defer，这里手动放锁
 		os.Exit(0)
 	}()
 

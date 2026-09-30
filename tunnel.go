@@ -39,6 +39,27 @@ type Tunnel struct {
 	// 手动换节点要避开它们：只排除"当前这个"的话，连点两次就会在
 	// 两个节点之间来回跳（A 换成 B，B 再换回 A）。
 	swapped []string
+	// prevHost 是"换节点动作还没收尾"的标记：记着换之前绑的是谁。
+	//
+	// 换节点分两步——先把隧道连到新节点，再把入站从旧节点改绑过来。
+	// 两步之间崩溃或重启的话，存盘的隧道已经是新节点、而入站还指着旧节点，
+	// 两边对不上，那个入站就掉成了没人认领的孤儿。
+	// 这个字段跟着状态一起落盘，重启后照着它把入站接回来。
+	prevHost string
+}
+
+// prevHostOf 读"换节点未收尾"标记。
+func (t *Tunnel) prevHostOf() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.prevHost
+}
+
+// setPrevHost 记下或清掉"换节点未收尾"标记。空串表示已经收尾。
+func (t *Tunnel) setPrevHost(host string) {
+	t.mu.Lock()
+	t.prevHost = host
+	t.mu.Unlock()
 }
 
 // swapHistoryMax 是换节点历史的上限。
@@ -88,8 +109,16 @@ func (t *Tunnel) forgetSwaps() {
 	t.mu.Unlock()
 }
 
-func (t *Tunnel) nsName() string { return fmt.Sprintf("fo%d", t.Slot) }
-func (t *Tunnel) subnet() string { return fmt.Sprintf("10.99.%d", t.Slot) }
+// 名字里都带上实例标识，否则同机第二个 fanout 会把这条隧道拆掉（见 instance.go）。
+// 默认工作目录下 instTag 是空串、instBase 是 99，名字与老版本完全一致。
+func (t *Tunnel) nsName() string { return fmt.Sprintf("fo%s%d", instTag, t.Slot) }
+func (t *Tunnel) subnet() string { return fmt.Sprintf("10.%d.%d", instBase, t.Slot) }
+
+// vethNames 返回母机侧与 netns 侧的网卡名。
+// 网卡名上限 15 个字符，"fov" + 4 位标识 + 槽位最多 9 个，留足余量。
+func (t *Tunnel) vethNames() (string, string) {
+	return fmt.Sprintf("fov%s%d", instTag, t.Slot), fmt.Sprintf("fop%s%d", instTag, t.Slot)
+}
 
 func run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
@@ -107,7 +136,7 @@ func runQuiet(name string, args ...string) {
 // setupNetns 建立 netns 与 veth 链路，并配好 NAT 与转发放行。
 func (t *Tunnel) setupNetns() error {
 	ns, sub := t.nsName(), t.subnet()
-	veth, peer := fmt.Sprintf("fov%d", t.Slot), fmt.Sprintf("fop%d", t.Slot)
+	veth, peer := t.vethNames()
 
 	t.teardownNetns()
 
@@ -179,8 +208,9 @@ func ensureRuleInsert(table, chain string, spec ...string) {
 func (t *Tunnel) teardownNetns() {
 	ns, sub := t.nsName(), t.subnet()
 	cidr := sub + ".0/30"
+	veth, _ := t.vethNames()
 	runQuiet("ip", "netns", "del", ns)
-	runQuiet("ip", "link", "del", fmt.Sprintf("fov%d", t.Slot))
+	runQuiet("ip", "link", "del", veth)
 	runQuiet("iptables", "-w", "5", "-t", "nat", "-D", "POSTROUTING", "-s", cidr, "-j", "MASQUERADE")
 	runQuiet("iptables", "-w", "5", "-D", "FORWARD", "-s", cidr, "-j", "ACCEPT")
 	runQuiet("iptables", "-w", "5", "-D", "FORWARD", "-d", cidr, "-j", "ACCEPT")
