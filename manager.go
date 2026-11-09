@@ -67,7 +67,23 @@ func (m *Manager) freeSlot() (int, error) {
 			return i, nil
 		}
 	}
-	return 0, fmt.Errorf("槽位已满（上限 %d）", m.maxSlots)
+	return 0, fmt.Errorf("槽位已满（上限 %d），可在设置里调大，或者先停几个出口", m.maxSlots)
+}
+
+// MaxSlots 返回当前生效的出口数上限。
+func (m *Manager) MaxSlots() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.maxSlots
+}
+
+// SetMaxSlots 改出口数上限，立即生效，不用重启。
+//
+// 已经在跑的出口不受影响：它们的槽位号还在，只是之后新建出口的上限跟着变。
+func (m *Manager) SetMaxSlots(n int) {
+	m.mu.Lock()
+	m.maxSlots = n
+	m.mu.Unlock()
 }
 
 // Start 为指定节点开一条隧道，返回分配到的本地端口。

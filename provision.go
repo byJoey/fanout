@@ -181,6 +181,8 @@ func (m *Manager) pickEveryRegion(perRegion int) ([]Node, error) {
 		used[t.Node.HostName] = true
 	}
 	room := m.maxSlots - len(m.tunnels)
+	// 上限可以在面板上随时改，所以得在锁里取一份，不能等解锁后再读
+	maxSlots := m.maxSlots
 	pool := m.nodePoolLocked()
 	filtered := len(pool) < len(m.nodes)
 
@@ -207,7 +209,7 @@ func (m *Manager) pickEveryRegion(perRegion int) ([]Node, error) {
 		return nil, m.noNodesErrLocked("", filtered)
 	}
 	if room <= 0 {
-		return nil, fmt.Errorf("槽位已满（上限 %d），先停几个出口再来", m.maxSlots)
+		return nil, fmt.Errorf("槽位已满（上限 %d），可在设置里调大，或者先停几个出口再来", maxSlots)
 	}
 
 	// 节点多的地区排前面：装不下时优先保住选择面大的那些

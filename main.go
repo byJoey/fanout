@@ -79,7 +79,17 @@ func main() {
 		log.Printf("节点链接后端: %s", p.Describe())
 	}
 
-	mgr := NewManager(*maxSlots, *workDir)
+	// 出口数上限：命令行显式给了 -max 就以命令行为准，否则用面板里存的值。
+	// 都要先于建 Manager 决定，恢复旧隧道时用的上限才是对的。
+	maxExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "max" {
+			maxExplicit = true
+		}
+	})
+	effectiveMax := resolveMaxSlots(*maxSlots, maxExplicit, readStoredMaxSlots(*workDir))
+	mgr := NewManager(effectiveMax, *workDir)
+	log.Printf("出口数上限: %d", effectiveMax)
 	log.Printf("正在拉取节点列表...")
 	if n, err := mgr.RefreshNodes(); err != nil {
 		log.Printf("拉取失败（可在 Web 界面重试）: %v", err)
@@ -168,10 +178,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载 Web 设置失败: %v", err)
 	}
+	// 命令行显式给了 -max 就以命令行为准，并写回设置，
+	// 让面板上显示的就是真实上限（跟 -web 一个道理）。
+	if maxExplicit && webCfg.MaxSlots != effectiveMax {
+		if err := setMaxSlots(effectiveMax); err != nil {
+			log.Printf("写回出口数上限失败: %v", err)
+		}
+	}
 
 	srv := newWebServer(StripBasePath(auth.Wrap(mux)))
-	// 设置面板：改密码 / 改路径 / 改端口 / 改本地监听。
-	mux.HandleFunc("/api/settings", apiSettings(auth, srv))
+	// 设置面板：改密码 / 改路径 / 改端口 / 改本地监听 / 改出口数上限。
+	mux.HandleFunc("/api/settings", apiSettings(auth, srv, mgr))
 	mux.HandleFunc("/api/update/check", apiUpdateCheck)
 	mux.HandleFunc("/api/update/apply", apiUpdateApply)
 
@@ -321,13 +338,14 @@ func apiCred(m *Manager) http.HandlerFunc {
 
 // apiSettings 管理界面自身的设置：改密码 / 改路径 / 改端口 / 改本地监听。
 // GET 返回当前值（不含明文口令）；POST 按传入的字段逐项应用，任一项失败即整体回报。
-func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
+func apiSettings(auth *Auth, srv *webServer, mgr *Manager) http.HandlerFunc {
 	type settingsReq struct {
 		Password        *string `json:"password"`         // 非空则改口令
 		BasePath        *string `json:"base_path"`        // 提供即改访问路径（空串=去掉前缀）
 		Port            *int    `json:"port"`             // 提供即改监听端口
 		ListenAddr      *string `json:"listen_addr"`      // 提供即改监听地址
 		ResidentialOnly *bool   `json:"residential_only"` // 提供即改"只用家宽"
+		MaxSlots        *int    `json:"max_slots"`        // 提供即改出口数上限
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -359,6 +377,19 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 					return
 				}
 			}
+			// 改出口数上限：落盘 + 立即生效，不用重启。
+			// 已经在跑的出口不受影响，只是之后新建出口的上限跟着变。
+			if in.MaxSlots != nil {
+				if err := validateMaxSlots(*in.MaxSlots); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := setMaxSlots(*in.MaxSlots); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				mgr.SetMaxSlots(*in.MaxSlots)
+			}
 			// 改端口 / 监听地址：合成一份新的 WebSettings 一起应用，避免绑两次
 			if in.Port != nil || in.ListenAddr != nil {
 				next := getWebSettings()
@@ -386,6 +417,7 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 			"listen_addr":      listen,
 			"has_password":     true,
 			"residential_only": cfg.residentialOnly(),
+			"max_slots":        mgr.MaxSlots(),
 			"version":          version,
 		})
 	}
