@@ -19,7 +19,11 @@ import (
 	"time"
 )
 
-const updateRepo = "byJoey/fanout"
+// updateRepo 是自更新时去哪儿取新版本。
+//
+// 编译时可以用 -X main.updateRepo=owner/repo 改掉，CI 会自动注入当前仓库，
+// 所以 fork 出来的版本自更新拉的是 fork 自己的 release，不会把本地改动冲掉。
+var updateRepo = "byJoey/fanout"
 
 // releaseInfo 是 GitHub Releases API 里我们关心的字段。
 type releaseInfo struct {
