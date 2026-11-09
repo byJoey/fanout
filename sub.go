@@ -68,17 +68,25 @@ func subFullURL(r *http.Request, tok string) string {
 }
 
 // apiSub 给界面用：返回订阅地址。
-func apiSub(w http.ResponseWriter, r *http.Request) {
-	tok, err := subToken()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+//
+// 一次给全两种订阅：节点链接（/sub）和 SOCKS5 出口（/socks）。
+// 两者共用同一串口令，界面上一并显示出来，省得用户自己拼地址。
+func apiSub(m *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, err := subToken()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"token":       tok,
+			"path":        subPath(tok),
+			"url":         subFullURL(r, tok),
+			"socks_path":  socksPath(tok),
+			"socks_url":   socksFullURL(r, tok),
+			"socks_count": len(socksSubEntries(m, publicHost(r))),
+		})
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"token": tok,
-		"path":  subPath(tok),
-		"url":   subFullURL(r, tok),
-	})
 }
 
 // apiSubReset 换一串新口令，旧订阅地址立刻作废。
@@ -92,10 +100,12 @@ func apiSubReset(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"token": tok,
-		"path":  subPath(tok),
-		"url":   subFullURL(r, tok),
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":      tok,
+		"path":       subPath(tok),
+		"url":        subFullURL(r, tok),
+		"socks_path": socksPath(tok),
+		"socks_url":  socksFullURL(r, tok),
 	})
 }
 
