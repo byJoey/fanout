@@ -136,10 +136,12 @@ func main() {
 	mux.HandleFunc("/api/panel/client/del", apiClientDelete(mgr))
 	mux.HandleFunc("/api/panel/client/reset", apiClientReset(mgr))
 	mux.HandleFunc("/api/panel/mode", apiPanelMode(*workDir))
-	mux.HandleFunc("/api/sub", apiSub)
+	mux.HandleFunc("/api/sub", apiSub(mgr))
 	mux.HandleFunc("/api/sub/reset", apiSubReset)
 	// 订阅本体走免登录（见 auth.go 的放行），口令在 handleSub 里验
 	mux.HandleFunc("/sub", handleSub(mgr))
+	// SOCKS5 出口订阅，跟节点链接订阅共用同一串口令
+	mux.HandleFunc("/socks", handleSocksSub(mgr))
 
 	auth, created, err := NewAuth(*workDir)
 	if err != nil {

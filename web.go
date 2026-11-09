@@ -444,16 +444,22 @@ textarea:focus{outline:none;border-color:var(--accent)}
       </button>
     </div>
     <div class="body">
-      <label class="f"><span>订阅地址</span>
+      <label class="f"><span>节点链接订阅</span>
         <input id="suburl" type="text" spellcheck="false" readonly></label>
       <div class="hint">客户端里新建订阅填这条。以后加出口、删出口都会自己跟上，不用重新配。</div>
+
+      <label class="f" style="margin-top:16px"><span>SOCKS5 出口订阅</span>
+        <input id="socksurl" type="text" spellcheck="false" readonly></label>
+      <div class="hint">每个出口一条 socks5:// ，端口在母机上，出口增删同样自动跟上。</div>
+
       <div class="hint bad">地址最后那串口令等于密码，别发群里。</div>
-      <div class="hint">想看明文而不是 base64，地址后面加 <code>&amp;target=links</code>。</div>
+      <div class="hint">想看明文而不是 base64，地址后面加 <code>&amp;target=links</code>；要 Clash 配置加 <code>&amp;target=clash</code>。</div>
     </div>
     <div class="foot">
       <span class="spacer"></span>
       <button id="subreset">换一串口令</button>
-      <button class="primary" id="subcopy">复制地址</button>
+      <button id="subcopy">复制节点订阅</button>
+      <button class="primary" id="sockscopy">复制 SOCKS5 订阅</button>
     </div>
   </div>
 </div>
@@ -1231,17 +1237,22 @@ $('#copyall').onclick = () => { const v = $('#exbox').value; if(v) copy(v); };
 // 这样反代、改端口、换路径之后拿到的都是用户此刻真正能访问的地址。
 async function showSub(d){
   $('#suburl').value = location.origin + d.path;
+  $('#socksurl').value = d.socks_path ? location.origin + d.socks_path : '';
   const n = view ? view.exits.flatMap(x => (x.inbounds || [])).length : 0;
-  $('#subcount').textContent = n ? n + ' 个节点' : '还没有节点，先开出口再建节点链接';
+  const m = d.socks_count || 0;
+  $('#subcount').textContent = (n ? n + ' 个节点' : '还没有节点链接')
+    + ' · ' + (m ? m + ' 个出口' : '还没有可用出口');
 }
 $('#subBtn').onclick = async () => {
   $('#suburl').value = '读取中…';
+  $('#socksurl').value = '读取中…';
   $('#subcount').textContent = '';
   openModal('subbox');
   try{ showSub(await api('/api/sub')); }
   catch(err){ $('#suburl').value = '读取失败: ' + err.message; }
 };
 $('#subcopy').onclick = () => { const v = $('#suburl').value; if(v) copy(v); };
+$('#sockscopy').onclick = () => { const v = $('#socksurl').value; if(v) copy(v); };
 $('#subreset').onclick = async e => {
   if(!confirm('换一串口令？旧地址立刻失效，已经配过的客户端要重新填一次。')) return;
   e.target.disabled = true;
