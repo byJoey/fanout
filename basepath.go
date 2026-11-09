@@ -74,9 +74,12 @@ func LoadBasePath(dir string) (string, bool, error) {
 
 	blob, err := os.ReadFile(path)
 	if err == nil {
-		if bp := strings.TrimSpace(string(blob)); bp != "" {
-			return normalizeBasePath(bp), false, nil
-		}
+		// 文件在，说明路径已经定下来了，哪怕内容是空的。
+		// 空串表示用户主动去掉了路径前缀（面板直接在根路径上），
+		// 这种设置必须原样留着：当成"还没配过"重新随机一个的话，
+		// 每次重启界面地址都会变，已经分发出去的订阅地址也跟着失效。
+		// 去掉首尾空白：落盘时带了换行，不去掉会被当成路径的一部分。
+		return normalizeBasePath(strings.TrimSpace(string(blob))), false, nil
 	} else if !os.IsNotExist(err) {
 		return "", false, err
 	}
