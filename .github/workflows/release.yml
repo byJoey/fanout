@@ -32,7 +32,9 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           VERSION="${GITHUB_REF_NAME:-dev}"
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+          # updateRepo 注入当前仓库：fork 出来的版本自更新拉的是 fork 自己的
+          # release，不会把本地改动换成上游的。
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.updateRepo=${GITHUB_REPOSITORY}" \
             -o fanout .
 
       - name: 打包
