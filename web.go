@@ -483,6 +483,10 @@ textarea:focus{outline:none;border-color:var(--accent)}
       <label class="chk" style="margin-top:16px"><input type="checkbox" id="setResi"> 只用家宽节点</label>
       <div class="hint" id="setResiHint">vpngate 里混着一批它自己的机房机器，出口一眼看得出是数据中心。勾着就只挑志愿者家宽。</div>
 
+      <label class="f" style="margin-top:16px"><span>最多出口数</span>
+        <input id="setMax" type="text" inputmode="numeric" spellcheck="false"></label>
+      <div class="hint">同时能跑多少条隧道。每条约占 10 MB 内存，改完立即生效，不用重启。</div>
+
       <div class="setrow">
         <label class="f" style="margin:0"><span>监听端口</span>
           <input id="setPort" type="text" inputmode="numeric" spellcheck="false"></label>
@@ -587,7 +591,10 @@ const STATUS = {up:'已连通', starting:'连接中', failed:'失败', stopped:'
 function renderExits(){
   const list = $('#list');
   const n = view.exits.length;
-  $('#ecount').textContent = n ? n + ' 个' : '';
+  const lim = view.max_slots || 0;
+  // 把上限一起显示出来：撞到上限时新建出口会失败，用户一眼能看出原因
+  $('#ecount').textContent = lim ? n + ' / ' + lim + ' 个' : (n ? n + ' 个' : '');
+  $('#ecount').title = lim ? ('已用 ' + n + ' / 上限 ' + lim + '，可在设置里调大') : '';
   $('#exportAll').disabled = !view.exits.some(e => e.inbounds && e.inbounds.length);
   $('#stopall').disabled = !n;
 
@@ -1291,6 +1298,7 @@ $('#settingsBtn').onclick = async () => {
     $('#setPort').value = s.port || '';
     $('#setListen').value = s.listen_addr || '0.0.0.0';
     $('#setResi').checked = s.residential_only !== false;
+    $('#setMax').value = s.max_slots || '';
     $('#setPathHint').textContent = '界面挂在这个路径下，扫端口的探不到。只能用字母数字和 - _。';
     $('#updCur').textContent = s.version || '-';
     $('#updLatest').textContent = '';
@@ -1365,6 +1373,8 @@ $('#setSave').onclick = async e => {
   if(port) body.port = port;
   body.listen_addr = $('#setListen').value;
   body.residential_only = $('#setResi').checked;
+  const mx = parseInt($('#setMax').value.trim(), 10);
+  if(mx) body.max_slots = mx;
 
   const portChanged = curSettings && (port !== curSettings.port
     || body.listen_addr !== (curSettings.listen_addr || '0.0.0.0'));

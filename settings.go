@@ -26,6 +26,66 @@ type WebSettings struct {
 	// SubToken 是订阅地址里的口令。订阅要免登录才能被客户端拉取，
 	// 所以这串就是它唯一的门槛，等同于密码，不要外传。
 	SubToken string `json:"sub_token,omitempty"`
+	// MaxSlots 是最多同时运行的出口数。0 表示没配过，按命令行 -max 或默认值来。
+	MaxSlots int `json:"max_slots,omitempty"`
+}
+
+// 出口数上限的取值范围。
+//
+// 上限 255 是硬约束：槽位号要能塞进网段 10.99.<槽位>，超过就不合法了。
+// 下限取 1，再小就没法开出口。
+const (
+	minMaxSlots = 1
+	maxMaxSlots = 200
+)
+
+// validateMaxSlots 校验出口数上限。
+func validateMaxSlots(n int) error {
+	if n < minMaxSlots || n > maxMaxSlots {
+		return fmt.Errorf("出口数上限必须在 %d-%d 之间", minMaxSlots, maxMaxSlots)
+	}
+	return nil
+}
+
+// setMaxSlots 改出口数上限并落盘。改完不用重启，调用方负责让 Manager 生效。
+func setMaxSlots(n int) error {
+	if err := validateMaxSlots(n); err != nil {
+		return err
+	}
+	webSettingsMu.Lock()
+	webSettingsCur.MaxSlots = n
+	webSettingsMu.Unlock()
+	return saveWebSettings()
+}
+
+// readStoredMaxSlots 从 settings.json 里读出存过的出口数上限，没存过返回 0。
+//
+// 单独读一遍是因为 Manager 要在加载设置之前就知道上限，
+// 不然恢复旧隧道的时候用的还是命令行默认值。
+func readStoredMaxSlots(dir string) int {
+	blob, err := os.ReadFile(webSettingsFilePath(dir))
+	if err != nil {
+		return 0
+	}
+	var s WebSettings
+	if err := json.Unmarshal(blob, &s); err != nil {
+		return 0
+	}
+	return s.MaxSlots
+}
+
+// resolveMaxSlots 决定实际生效的出口数上限。
+//
+// 命令行显式给了 -max 就以命令行为准（跟 -web 一个道理：敲了参数就得算数），
+// 否则用面板里存的值，都没配过用默认值。
+func resolveMaxSlots(flagVal int, explicit bool, stored int) int {
+	if explicit {
+		return flagVal
+	}
+	if stored > 0 {
+		return stored
+	}
+	return flagVal
 }
 
 // residentialOnly 返回"只用家宽"是否开启。没配过时默认开：

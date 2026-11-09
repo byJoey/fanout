@@ -46,6 +46,8 @@ type ExitsView struct {
 	PanelInfo string `json:"panel_info"`
 	// PublicIP 是母机公网 IPv4，前端用它当 SOCKS5/分享链接的连接地址
 	PublicIP string `json:"public_ip"`
+	// MaxSlots 是当前生效的出口数上限，前端据此显示占用情况
+	MaxSlots int `json:"max_slots"`
 }
 
 // inboundCache 给入站列表做很短的缓存。界面每几秒轮询一次，
@@ -87,7 +89,7 @@ func invalidateInbounds() {
 // ExitsOf 把隧道和入站 join 成界面直接可用的形态。
 func (m *Manager) ExitsOf() ExitsView {
 	tunnels := m.Tunnels()
-	view := ExitsView{Exits: make([]Exit, 0, len(tunnels)), PublicIP: hostPublicIP()}
+	view := ExitsView{Exits: make([]Exit, 0, len(tunnels)), PublicIP: hostPublicIP(), MaxSlots: m.MaxSlots()}
 
 	// 先填后端类型：入站读取失败时界面仍要知道当前是哪种模式
 	if p, err := openPanel(); err == nil {
