@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,12 @@ type Tunnel struct {
 	listener net.Listener
 	ovpn     *exec.Cmd
 	mu       sync.Mutex
+	// udevIdx 是本隧道创建过的 veth 两端 ifindex。删除 veth 时 systemd-udevd
+	// 不会清理 /run/udev/data/n<ifindex> 数据库文件（实测普通 veth 与 netns
+	// 内 veth 都一样），长期高频建删会把 /run tmpfs 的空间和 inode 耗尽，
+	// 之后 ip netns add 报 No space left on device，所有出口隧道创建失败。
+	// 这里记下来，teardown 时顺手清掉自己留下的残留。
+	udevIdx []int
 	// swapped 是这条出口换节点时用过的 hostname，按时间先后排。
 	// 手动换节点要避开它们：只排除"当前这个"的话，连点两次就会在
 	// 两个节点之间来回跳（A 换成 B，B 再换回 A）。
@@ -154,6 +161,9 @@ func (t *Tunnel) setupNetns() error {
 	if err := run("ip", "link", "add", veth, "type", "veth", "peer", "name", peer); err != nil {
 		return err
 	}
+	// 趁两端都还在母机的命名空间里，记下 ifindex。
+	// peer 端随后会被移进隧道 netns，那时母机侧就看不到它了。
+	t.recordVethIdx(veth, peer)
 	if err := run("ip", "link", "set", peer, "netns", ns); err != nil {
 		return err
 	}
@@ -216,9 +226,55 @@ func (t *Tunnel) teardownNetns() {
 	veth, _ := t.vethNames()
 	runQuiet("ip", "netns", "del", ns)
 	runQuiet("ip", "link", "del", veth)
+	t.cleanupUdevData()
 	runQuiet("iptables", "-w", "5", "-t", "nat", "-D", "POSTROUTING", "-s", cidr, "-j", "MASQUERADE")
 	runQuiet("iptables", "-w", "5", "-D", "FORWARD", "-s", cidr, "-j", "ACCEPT")
 	runQuiet("iptables", "-w", "5", "-D", "FORWARD", "-d", cidr, "-j", "ACCEPT")
+}
+
+// recordVethIdx 记录 veth 两端的内核 ifindex，供 teardown 时清理 udev 残留。
+// 必须在 ip link set ... netns 之前调用：peer 端移入隧道命名空间后，
+// 母机 /sys/class/net 下就看不到它了，ifindex 读不到。
+// 读取放在母机网络命名空间里做：当前线程可能已被 dialerInNetns 带进隧道，
+// 那样 /sys/class/net 看到的是隧道内部，读不到母机侧刚创建的 veth。
+func (t *Tunnel) recordVethIdx(names ...string) {
+	_ = inMainNetns(func() error {
+		for _, n := range names {
+			b, err := os.ReadFile(filepath.Join("/sys/class/net", n, "ifindex"))
+			if err != nil {
+				continue
+			}
+			idx, err := strconv.Atoi(strings.TrimSpace(string(b)))
+			if err != nil || idx <= 0 {
+				continue
+			}
+			t.udevIdx = append(t.udevIdx, idx)
+		}
+		return nil
+	})
+}
+
+// cleanupUdevData 删除这条隧道创建过的 veth 在 /run/udev/data 留下的
+// n<ifindex> 数据库文件。
+//
+// systemd-udevd 在 veth 接口删除后不会清理这些文件（实测普通 veth 与
+// netns 内 veth 都一样），而 fanout 每次建隧道/换节点/重连都会建删一对
+// veth。长期运行会把 /run tmpfs 的空间与 inode 耗尽：ip netns add 要在
+// /run/netns 下建文件并挂载，随即报 No space left on device，所有出口
+// 隧道创建失败，界面表现为"已换到第 x 个候选节点"后全部 failed。
+// 这里"谁制造谁清理"，不依赖 udevd 的行为。
+func (t *Tunnel) cleanupUdevData() {
+	if len(t.udevIdx) == 0 {
+		return
+	}
+	// udevd 在 veth 删除事件处理时会重建 /run/udev/data/n<ifindex>：
+	// 实测删除后文件短暂消失，事件处理完（udevadm settle）又出现。
+	// 必须先等事件队列清空再删，否则删了会被它随后写回来。
+	runQuiet("udevadm", "settle", "--timeout=5")
+	for _, idx := range t.udevIdx {
+		_ = os.Remove(filepath.Join("/run/udev/data", fmt.Sprintf("n%d", idx)))
+	}
+	t.udevIdx = nil
 }
 
 // startOpenVPN 在 netns 内拉起 openvpn，并等待 tun0 拿到地址。
